@@ -159,6 +159,9 @@
     .more:hover:not(:disabled) { background: none; color: #a5a6ff; }
     .empty { color: #333; font-size: 0.875rem; text-align: center; padding: 48px 0; }
     mark { background: #3b3b8f; color: #fff; border-radius: 3px; padding: 0 2px; }
+    details.manual { border-top: 1px solid #222; padding-top: 12px; }
+    details.manual summary { cursor: pointer; font-size: 0.85rem; color: #888; }
+    details.manual summary:hover { color: #ccc; }
   </style>
 </head>
 <body>
@@ -239,26 +242,32 @@
         <img id="ytThumb" alt="">
         <div>
           <div class="t" id="ytTitle"></div>
-          <div class="row" style="margin-top:8px">
-            <button class="ghost" id="ytOpen" onclick="openTranscript()">Open video to get transcript ↗</button>
-          </div>
         </div>
       </div>
-      <div class="help" id="ytHelp" style="display:none">
-        <strong>How to copy the transcript</strong> (YouTube doesn't let apps grab it for you — yet):
-        <ol>
-          <li>Click <em>Open video</em> above.</li>
-          <li>Under the video, click <em>...more</em> in the description.</li>
-          <li>Scroll down and click <em>Show transcript</em>.</li>
-          <li>Click and drag to select all the transcript text, then copy it (⌘+C).</li>
-          <li>Come back here and paste it below (⌘+V).</li>
-        </ol>
-      </div>
-      <textarea id="ytText" placeholder="Paste the transcript here..." rows="6"></textarea>
       <div class="row" style="margin-top:0">
-        <button id="ytBtn" onclick="saveYouTube()">Save to Brain</button>
-        <span class="msg" id="ytMsg"></span>
+        <button id="ytAutoBtn" onclick="saveYouTubeAuto()">Save transcript</button>
+        <span class="msg" id="ytAutoMsg"></span>
       </div>
+      <div class="hint">Your server fetches the transcript for you. It takes 10–30 seconds.</div>
+      <details class="manual">
+        <summary>Or paste the transcript yourself</summary>
+        <div class="stack" style="margin-top:12px">
+          <div class="help">
+            <ol>
+              <li><button class="linkish" onclick="openTranscript()">Open the video ↗</button></li>
+              <li>Under the video, click <em>...more</em> in the description.</li>
+              <li>Scroll down and click <em>Show transcript</em>.</li>
+              <li>Select all the transcript text and copy it (⌘+C).</li>
+              <li>Paste it below (⌘+V).</li>
+            </ol>
+          </div>
+          <textarea id="ytText" placeholder="Paste the transcript here..." rows="6"></textarea>
+          <div class="row" style="margin-top:0">
+            <button id="ytBtn" onclick="saveYouTube()">Save pasted transcript</button>
+            <span class="msg" id="ytMsg"></span>
+          </div>
+        </div>
+      </details>
     </div>
 
     <!-- PDF -->
@@ -281,16 +290,25 @@
     <!-- URL -->
     <div class="panel card stack" id="panel-url">
       <input type="url" id="urlInput" placeholder="Paste the web address, e.g. https://example.com/article">
-      <div class="help">
-        Web browsers don't let one website read another website for you, for safety reasons.
-        So for now: open the article, select its text, copy it (⌘+C), and paste it below (⌘+V).
-        In Level 3 this becomes automatic.
-      </div>
-      <textarea id="urlText" placeholder="Paste the article text here..." rows="6"></textarea>
       <div class="row" style="margin-top:0">
-        <button id="urlBtn" onclick="saveUrl()">Save to Brain</button>
-        <span class="msg" id="urlMsg"></span>
+        <button id="urlAutoBtn" onclick="saveUrlAuto()">Save article</button>
+        <span class="msg" id="urlAutoMsg"></span>
       </div>
+      <div class="hint">Your server reads the page and saves its text.</div>
+      <details class="manual">
+        <summary>Or paste the article text yourself</summary>
+        <div class="stack" style="margin-top:12px">
+          <div class="help">
+            Some pages need a login or build themselves in ways a server can't read.
+            For those: open the article, select its text, copy it (⌘+C), and paste it below (⌘+V).
+          </div>
+          <textarea id="urlText" placeholder="Paste the article text here..." rows="6"></textarea>
+          <div class="row" style="margin-top:0">
+            <button id="urlBtn" onclick="saveUrl()">Save pasted text</button>
+            <span class="msg" id="urlMsg"></span>
+          </div>
+        </div>
+      </details>
     </div>
 
     <!-- SEARCH -->
@@ -619,7 +637,6 @@
     if (!id) {
       ytVideo = null
       preview.style.display = 'none'
-      document.getElementById('ytHelp').style.display = 'none'
       return
     }
     if (ytVideo && ytVideo.id === id) return
@@ -627,7 +644,6 @@
     document.getElementById('ytThumb').src = 'https://i.ytimg.com/vi/' + id + '/hqdefault.jpg'
     document.getElementById('ytTitle').textContent = 'Loading title...'
     preview.style.display = 'flex'
-    document.getElementById('ytHelp').style.display = 'block'
     try {
       const r = await fetch('https://www.youtube.com/oembed?format=json&url=' +
         encodeURIComponent('https://www.youtube.com/watch?v=' + id))
@@ -640,6 +656,45 @@
 
   function openTranscript() {
     if (ytVideo) window.open('https://www.youtube.com/watch?v=' + ytVideo.id, '_blank')
+    else setMsg('ytMsg', 'Paste a YouTube link at the top first.', 'err')
+  }
+
+  // Ask one of your server functions (capture-youtube / capture-url) to
+  // fetch and save a link. Your login travels with the request, so the
+  // server knows whose brain to save into.
+  async function callCapture(name, url) {
+    const { data, error } = await db.functions.invoke(name, { body: { url } })
+    if (error) {
+      let message = error.message
+      try { message = (await error.context.json()).error || message } catch (_) {}
+      throw new Error(message)
+    }
+    if (!data || !data.ok) throw new Error((data && data.error) || 'Something went wrong.')
+    return data
+  }
+
+  async function saveYouTubeAuto() {
+    const url = document.getElementById('ytUrl').value.trim()
+    if (!youTubeId(url)) { setMsg('ytAutoMsg', 'Paste a YouTube link first.', 'err'); return }
+    const btn = document.getElementById('ytAutoBtn')
+    btn.disabled = true
+    btn.textContent = 'Fetching transcript...'
+    setMsg('ytAutoMsg', '')
+    try {
+      const v = await callCapture('capture-youtube', url)
+      setMsg('ytAutoMsg', v.hasTranscript
+        ? '✓ Saved the transcript (' + v.chars.toLocaleString() + ' characters)'
+        : '✓ Saved — no transcript was available, so the description was saved instead', 'ok')
+      document.getElementById('ytUrl').value = ''
+      document.getElementById('ytPreview').style.display = 'none'
+      ytVideo = null
+      await loadRecent()
+    } catch (e) {
+      setMsg('ytAutoMsg', '✗ ' + e.message, 'err')
+    } finally {
+      btn.disabled = false
+      btn.textContent = 'Save transcript'
+    }
   }
 
   function saveYouTube() {
@@ -655,7 +710,6 @@
       el.value = ''
       document.getElementById('ytUrl').value = ''
       document.getElementById('ytPreview').style.display = 'none'
-      document.getElementById('ytHelp').style.display = 'none'
       ytVideo = null
     })
   }
@@ -739,6 +793,26 @@
   }
 
   // ---------- URL ----------
+
+  async function saveUrlAuto() {
+    const url = document.getElementById('urlInput').value.trim()
+    if (!/^https?:\/\//i.test(url)) { setMsg('urlAutoMsg', 'Paste the full web address, starting with https://', 'err'); return }
+    const btn = document.getElementById('urlAutoBtn')
+    btn.disabled = true
+    btn.textContent = 'Reading page...'
+    setMsg('urlAutoMsg', '')
+    try {
+      const a = await callCapture('capture-url', url)
+      setMsg('urlAutoMsg', '✓ Saved "' + a.title + '"', 'ok')
+      document.getElementById('urlInput').value = ''
+      await loadRecent()
+    } catch (e) {
+      setMsg('urlAutoMsg', '✗ ' + e.message + ' You can paste the text yourself below.', 'err')
+    } finally {
+      btn.disabled = false
+      btn.textContent = 'Save article'
+    }
+  }
 
   function saveUrl() {
     const url = document.getElementById('urlInput').value.trim()
