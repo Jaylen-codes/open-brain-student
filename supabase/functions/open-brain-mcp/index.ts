@@ -139,11 +139,18 @@ function clamp(n: unknown, dflt: number, max: number): number {
   return Number.isFinite(v) && v > 0 ? Math.min(v, max) : dflt
 }
 
-type Row = { id: string; content: string; created_at: string }
+type Row = {
+  id: string; content: string; created_at: string
+  category?: string | null; tags?: string[] | null; summary?: string | null
+}
 
 function formatList(rows: Row[], query?: string): string {
   return rows.map((t, i) =>
-    `${i + 1}. [${when(t.created_at)}] (id: ${t.id}, ${t.content.length.toLocaleString()} chars)\n${excerpt(t.content, query)}`
+    `${i + 1}. [${when(t.created_at)}] (id: ${t.id}, ${t.content.length.toLocaleString()} chars)` +
+    (t.category ? `\nCategory: ${t.category}` : '') +
+    (t.tags && t.tags.length ? `\nTags: ${t.tags.join(', ')}` : '') +
+    (t.summary ? `\nSummary: ${t.summary}` : '') +
+    `\n${excerpt(t.content, query)}`
   ).join('\n\n')
 }
 
@@ -161,7 +168,7 @@ async function callTool(name: string, args: any): Promise<string> {
     // Escape the characters that mean "anything" to the database search
     const pattern = '%' + query.replace(/[\\%_]/g, m => '\\' + m) + '%'
     const { data, error } = await db.from('thoughts')
-      .select('id, content, created_at')
+      .select('id, content, created_at, category, tags, summary')
       .eq('user_id', OWNER_USER_ID)
       .ilike('content', pattern)
       .order('created_at', { ascending: false })
@@ -175,7 +182,7 @@ async function callTool(name: string, args: any): Promise<string> {
   if (name === 'list_recent') {
     const limit = clamp(args?.limit, 10, 50)
     const { data, error } = await db.from('thoughts')
-      .select('id, content, created_at')
+      .select('id, content, created_at, category, tags, summary')
       .eq('user_id', OWNER_USER_ID)
       .order('created_at', { ascending: false })
       .limit(limit)
