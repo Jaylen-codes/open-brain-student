@@ -155,15 +155,28 @@ async function fromSupadata(videoId: string): Promise<VideoContent | null> {
   if (!SUPADATA_KEY) return null
   try {
     const videoUrl = 'https://www.youtube.com/watch?v=' + videoId
+    const headers = { 'x-api-key': SUPADATA_KEY }
     const res = await fetch(
-      `https://api.supadata.ai/v1/youtube/transcript?url=${encodeURIComponent(videoUrl)}&text=true`,
-      { headers: { 'x-api-key': SUPADATA_KEY }, signal: AbortSignal.timeout(25_000) })
+      `https://api.supadata.ai/v1/transcript?url=${encodeURIComponent(videoUrl)}&text=true`,
+      { headers, signal: AbortSignal.timeout(25_000) })
     if (!res.ok) {
       // 402 here almost always means the free monthly allowance is used up
       console.log(`[youtube] Supadata HTTP ${res.status} — trying the next route`)
       return null
     }
-    const data = await res.json()
+    // deno-lint-ignore no-explicit-any
+    let data: any = await res.json()
+    // Long videos are processed in the background: Supadata hands back a job
+    // id to check on. Poll it for up to ~20 seconds.
+    for (let i = 0; data?.jobId && !data?.content && i < 10; i++) {
+      await new Promise(r => setTimeout(r, 2000))
+      const poll = await fetch(`https://api.supadata.ai/v1/transcript/${data.jobId}`,
+        { headers, signal: AbortSignal.timeout(10_000) })
+      if (!poll.ok) return null
+      const job = await poll.json()
+      if (job?.status === 'failed') return null
+      if (job?.status === 'completed' || job?.content) data = job
+    }
     const content = data?.content
     const text = (typeof content === 'string'
       ? content
@@ -179,18 +192,20 @@ async function fromSupadata(videoId: string): Promise<VideoContent | null> {
 
 async function fromInnertube(videoId: string): Promise<VideoContent | null> {
   const clients = [
-    {
-      name: 'IOS',
-      userAgent: 'com.google.ios.youtube/19.29.1 (iPhone; CPU iPhone OS 18_0 like Mac OS X)',
-      context: {
-        clientName: 'IOS', clientVersion: '19.29.1', deviceMake: 'Apple',
-        deviceModel: 'iPhone17,2', osName: 'iPhone', osVersion: '18.1.0.22B83', hl: 'en', gl: 'US',
-      },
-    },
+    // YouTube rejects app versions it considers too old ("Precondition check
+    // failed"), so these version numbers need bumping now and then.
     {
       name: 'ANDROID',
       userAgent: 'com.google.android.youtube/20.10.38 (Linux; U; Android 14)',
-      context: { clientName: 'ANDROID', clientVersion: '20.10.38', hl: 'en', gl: 'US' },
+      context: { clientName: 'ANDROID', clientVersion: '20.10.38', androidSdkVersion: 34, hl: 'en', gl: 'US' },
+    },
+    {
+      name: 'IOS',
+      userAgent: 'com.google.ios.youtube/20.47.3 (iPhone16,2; U; CPU iOS 18_5 like Mac OS X)',
+      context: {
+        clientName: 'IOS', clientVersion: '20.47.3', deviceMake: 'Apple',
+        deviceModel: 'iPhone16,2', osName: 'iPhone', osVersion: '18.5.0.22F76', hl: 'en', gl: 'US',
+      },
     },
   ]
 
@@ -206,6 +221,8 @@ async function fromInnertube(videoId: string): Promise<VideoContent | null> {
       })
       if (!res.ok) { console.log(`[youtube] Innertube ${c.name} HTTP ${res.status}`); continue }
       const result = await res.json()
+      const status = result?.playabilityStatus?.status
+      if (status && status !== 'OK') console.log(`[youtube] Innertube ${c.name}: ${status} — ${result?.playabilityStatus?.reason ?? ''}`)
       const tracks = result?.captions?.playerCaptionsTracklistRenderer?.captionTracks
       if (Array.isArray(tracks) && tracks.length) { best = result; break }
       if (!best) best = result   // keep it: it still has the description
@@ -262,7 +279,10 @@ export async function captureYouTube(admin: Admin, userId: string, rawUrl: strin
   const title = await fetchTitle(videoId)
   const result = (await fromSupadata(videoId)) ?? (await fromInnertube(videoId))
   if (!result) {
-    throw new CaptureError('Could not read anything from that video. It may be private, age-restricted or region-locked.')
+    throw new CaptureError(
+      SUPADATA_KEY
+        ? 'Could not read anything from that video. It may be private, age-restricted or region-locked.'
+        : 'YouTube blocked the server from reading that video. Adding the free SUPADATA_API_KEY fixes this for most videos.')
   }
 
   const label = result.hasTranscript ? '' : '(No transcript was available — this is the video description.)\n\n'
