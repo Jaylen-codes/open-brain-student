@@ -45,8 +45,12 @@ async function viaOpenRouter(text: string): Promise<number[]> {
   return data?.data?.[0]?.embedding ?? []
 }
 
+// The most recent failure, so callers can report it.
+export let lastEmbedError = ''
+
 // Returns null instead of throwing, so a failed embedding never breaks a save.
 export async function embed(text: string): Promise<number[] | null> {
+  lastEmbedError = ''
   const clean = (text ?? '').replace(/\s+/g, ' ').trim().slice(0, 4000)
   if (!clean) return null
   try {
@@ -54,7 +58,8 @@ export async function embed(text: string): Promise<number[] | null> {
     if (v.length !== EMBED_DIMENSIONS) throw new Error(`expected ${EMBED_DIMENSIONS} numbers, got ${v.length}`)
     return v
   } catch (err) {
-    console.error('[embed] Failed:', err instanceof Error ? err.message : String(err))
+    lastEmbedError = err instanceof Error ? err.message : String(err)
+    console.error('[embed] Failed:', lastEmbedError)
     return null
   }
 }

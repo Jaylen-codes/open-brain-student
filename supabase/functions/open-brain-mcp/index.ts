@@ -29,7 +29,7 @@
 // ============================================================================
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
-import { embed, toPgVector } from '../_shared/embed.ts'
+import { searchBrain } from '../_shared/search.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!
 const SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
@@ -73,8 +73,9 @@ const TOOLS = [
   {
     name: 'search_thoughts',
     description:
-      "Search the user's personal knowledge base (their 'Open Brain') by meaning: it finds thoughts " +
-      'about the same idea even when they use different words, plus any that contain the exact words. ' +
+      "Search the user's personal knowledge base (their 'Open Brain'). Hybrid search: it finds thoughts " +
+      'about the same idea even in different words, exact names and terms, and specific passages inside ' +
+      'long transcripts and articles (shown as the matching passage). ' +
       'Each result lists the thoughts it is linked to. Returns short excerpts with ids; use ' +
       'get_thought for the full text.',
     inputSchema: {
@@ -170,37 +171,9 @@ async function callTool(name: string, args: any): Promise<string> {
     if (!query) throw new Error('query is required')
     const limit = clamp(args?.limit, 10, 25)
 
-    // 1. By meaning: place the question on the same "map" as the thoughts,
-    //    then take the nearest ones.
-    let byMeaning: (Row & { similarity: number })[] = []
-    const vector = await embed(query)
-    if (vector) {
-      const { data, error } = await db.rpc('search_thoughts', {
-        query_embedding: toPgVector(vector),
-        match_threshold: SEARCH_THRESHOLD,
-        match_count: limit,
-        p_user_id: OWNER_USER_ID,
-      })
-      if (error) throw error
-      byMeaning = data ?? []
-    }
-
-    // 2. By exact words, for names and terms meaning can miss.
-    const pattern = '%' + query.replace(/[\\%_]/g, m => '\\' + m) + '%'
-    const { data: byWords, error } = await db.from('thoughts')
-      .select('id, content, created_at, category, tags, summary')
-      .eq('user_id', OWNER_USER_ID)
-      .ilike('content', pattern)
-      .order('created_at', { ascending: false })
-      .limit(limit)
-    if (error) throw error
-
-    const seen = new Set(byMeaning.map(r => r.id))
-    const results: (Row & { similarity?: number })[] = [
-      ...byMeaning,
-      ...(byWords ?? []).filter(r => !seen.has(r.id)),
-    ].slice(0, limit)
-    if (!results.length) return `Nothing in the brain matches "${query}", by meaning or by exact words.`
+    // Hybrid search (meaning + keywords, including pieces of long captures)
+    const results = await searchBrain(db, OWNER_USER_ID, query, limit)
+    if (!results.length) return `Nothing in the brain matches "${query}", by meaning or by keywords.`
 
     // 3. The graph: what each result is linked to.
     const ids = results.map(r => r.id)
@@ -228,14 +201,17 @@ async function callTool(name: string, args: any): Promise<string> {
     const body = results.map((t, i) => {
       const match = typeof t.similarity === 'number'
         ? `${Math.round(t.similarity * 100)}% match by meaning`
-        : 'contains your exact words'
+        : 'matched by keywords'
+      const piece = t.matched_chunk
+        ? `\n   ↳ matching passage (from partway through a longer capture): "${t.matched_chunk.replace(/\s+/g, ' ').trim().slice(0, 700)}"`
+        : ''
       const linked = (neighborsOf.get(t.id) ?? [])
         .filter(n => neighborRows.has(n.id))
         .map(n => {
           const r = neighborRows.get(n.id)!
           return `   ↳ linked (${Math.round(n.score * 100)}%): ${(r.summary || r.content).replace(/\s+/g, ' ').slice(0, 160)} (id: ${n.id})`
         })
-      return formatList([t], query).replace(/^1\. /, `${i + 1}. `).replace(/\n/, ` — ${match}\n`) +
+      return formatList([t], query).replace(/^1\. /, `${i + 1}. `).replace(/\n/, ` — ${match}\n`) + piece +
         (linked.length ? '\n' + linked.join('\n') : '')
     }).join('\n\n')
     return `Found ${results.length} thought(s) for "${query}":\n\n${body}`

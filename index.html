@@ -158,6 +158,8 @@
     .more { font-size: 0.75rem; color: #8b8df5; cursor: pointer; background: none; padding: 0; }
     .more:hover:not(:disabled) { background: none; color: #a5a6ff; }
     .empty { color: #333; font-size: 0.875rem; text-align: center; padding: 48px 0; }
+    .passage { margin-top: 10px; padding: 10px 12px; border-left: 3px solid #6366f1; background: #12121f; border-radius: 6px; font-size: 0.85rem; color: #bbb; line-height: 1.5; }
+    .passage-label { font-size: 0.7rem; color: #8b8df5; margin-bottom: 4px; }
     .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
     .chip { font-size: 0.7rem; color: #9a9bf7; background: #1b1b33; border: 1px solid #2a2a4d; border-radius: 999px; padding: 2px 9px; }
     .chip.cat { color: #ccc; background: #222; border-color: #333; }
@@ -849,10 +851,15 @@
         (Array.isArray(t.tags) ? t.tags.map(x => '<span class="chip">' + esc(x) + '</span>').join('') : '')
       const match = typeof t.similarity === 'number'
         ? ' · ' + Math.round(t.similarity * 100) + '% match by meaning'
-        : (highlight && t.similarity === null ? ' · exact words' : '')
+        : (highlight && t.similarity === null ? ' · matched by keywords' : '')
+      const passage = t.matched_chunk
+        ? '<div class="passage"><div class="passage-label">Matching passage (from partway through a longer capture)</div>' +
+          esc(t.matched_chunk.replace(/\s+/g, ' ').trim().slice(0, 600)) + '…</div>'
+        : ''
       return `
         <div class="thought">
           <div class="thought-text">${body}</div>
+          ${passage}
           ${chips ? '<div class="chips">' + chips + '</div>' : ''}
           <div class="thought-foot">
             <div class="thought-time">${fmt(t.created_at)}${match}</div>

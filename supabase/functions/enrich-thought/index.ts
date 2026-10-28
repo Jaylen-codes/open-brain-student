@@ -9,6 +9,12 @@
 //                                                                (Level 6)
 //   3. LINK  — connect it to the existing thoughts that mean something
 //              similar, in the thought_links table               (Level 6)
+//   4. CHUNK — long captures (over 2,000 characters) are cut into pieces,
+//              each with its own meaning coordinates             (Level 7)
+//
+// A function only gets a couple of seconds of computer time per call, so a
+// long transcript's pieces are mapped a few at a time: this function calls
+// itself again until every piece is done.
 //
 // DEPLOY WITH:
 //   npx supabase functions deploy enrich-thought --no-verify-jwt
@@ -21,7 +27,8 @@
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { callLLM, parseJsonObject } from '../_shared/llm.ts'
-import { embed, embeddingText, toPgVector } from '../_shared/embed.ts'
+import { embed, embeddingText, lastEmbedError, toPgVector } from '../_shared/embed.ts'
+import { embedPendingChunks, saveThoughtChunks } from '../_shared/thought-chunks.ts'
 
 const db = createClient(Deno.env.get('SUPABASE_URL')!, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!)
 
@@ -31,6 +38,8 @@ const MAX_CHARS_TO_AI = 12_000   // a long transcript only needs its opening to 
 // which scores even unrelated English text fairly high.
 const LINK_THRESHOLD = Number(Deno.env.get('LINK_THRESHOLD') ?? '0.82')
 const LINKS_PER_THOUGHT = 5
+const CHUNKS_PER_CALL = 2   // pieces mapped per call — more than this runs out of time on the free plan (error 546)
+const SELF_URL = `${Deno.env.get('SUPABASE_URL')}/functions/v1/enrich-thought`
 
 const SYSTEM = 'You organize notes in a personal knowledge base. Reply with JSON only.'
 
@@ -137,6 +146,27 @@ Deno.serve(async (req) => {
     }
 
     if (!t.embedding) Object.assign(result, await mapAndLink(t))
+
+    // Long capture: save its pieces (once), then map a few of them.
+    const created = await saveThoughtChunks(db, t.id, t.content)
+    if (created) result.chunks_created = created
+    const waiting = await embedPendingChunks(db, t.id, CHUNKS_PER_CALL)
+    if (lastEmbedError) result.embed_error = lastEmbedError
+    // round counts how many times this has continued itself; the cap means a
+    // piece that keeps failing can never cause an endless loop.
+    const round = Math.max(0, Math.floor(Number(body?.round) || 0))
+    if (waiting > 0 && round < 60) {
+      result.chunks_waiting = waiting
+      // Come back for the rest in a fresh call (this one has used its time).
+      // deno-lint-ignore no-explicit-any
+      const runtime = (globalThis as any).EdgeRuntime
+      const next = fetch(SELF_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: t.id, round: round + 1 }),
+      }).catch(err => console.error('[enrich] Could not continue:', String(err)))
+      if (runtime?.waitUntil) runtime.waitUntil(next)
+    }
 
     return ok(result)
   } catch (err) {
