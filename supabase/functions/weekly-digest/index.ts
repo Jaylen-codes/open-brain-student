@@ -102,7 +102,7 @@ Deno.serve(async () => {
     const weekOf = new Date(now - 7 * DAY).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })
     const content = `📰 Weekly digest — week of ${weekOf}\n\n${text}`
 
-    const { error: insErr } = await db.from('thoughts').insert({
+    const { error: insErr } = await db.from('thoughts').upsert({
       user_id: OWNER_USER_ID,
       content,
       category: 'digest',
@@ -110,7 +110,7 @@ Deno.serve(async () => {
       summary: `Weekly digest for the week of ${weekOf}`,
       enriched_at: new Date().toISOString(),
       metadata: { source: 'weekly-digest', notes_read: week.length },
-    })
+    }, { onConflict: 'dedup_key,user_id', ignoreDuplicates: false })
     if (insErr) throw insErr
 
     await sendTelegram(content)

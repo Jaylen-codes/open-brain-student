@@ -29,11 +29,14 @@
 // ============================================================================
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
+import { embed, toPgVector } from '../_shared/embed.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!
 const SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
 const ACCESS_KEY = Deno.env.get('MCP_ACCESS_KEY') ?? ''
 const OWNER_USER_ID = Deno.env.get('OWNER_USER_ID') ?? ''
+// How close in meaning a thought must be to count as a search match (0–1).
+const SEARCH_THRESHOLD = Number(Deno.env.get('SEARCH_THRESHOLD') ?? '0.75')
 
 // The service role key skips the Level 2 security rules, so every query
 // below filters by OWNER_USER_ID by hand, and every insert sets it.
@@ -70,13 +73,14 @@ const TOOLS = [
   {
     name: 'search_thoughts',
     description:
-      "Search the user's personal knowledge base (their 'Open Brain') for thoughts containing a word " +
-      'or phrase. Matching is by exact text, so try a few related words if the first search finds ' +
-      'nothing. Returns short excerpts with ids; use get_thought for the full text.',
+      "Search the user's personal knowledge base (their 'Open Brain') by meaning: it finds thoughts " +
+      'about the same idea even when they use different words, plus any that contain the exact words. ' +
+      'Each result lists the thoughts it is linked to. Returns short excerpts with ids; use ' +
+      'get_thought for the full text.',
     inputSchema: {
       type: 'object',
       properties: {
-        query: { type: 'string', description: 'Word or phrase to look for' },
+        query: { type: 'string', description: 'What to look for — a word, phrase, question or idea' },
         limit: { type: 'number', description: 'How many results (default 10, max 25)' },
       },
       required: ['query'],
@@ -165,18 +169,76 @@ async function callTool(name: string, args: any): Promise<string> {
     const query = String(args?.query ?? '').trim()
     if (!query) throw new Error('query is required')
     const limit = clamp(args?.limit, 10, 25)
-    // Escape the characters that mean "anything" to the database search
+
+    // 1. By meaning: place the question on the same "map" as the thoughts,
+    //    then take the nearest ones.
+    let byMeaning: (Row & { similarity: number })[] = []
+    const vector = await embed(query)
+    if (vector) {
+      const { data, error } = await db.rpc('search_thoughts', {
+        query_embedding: toPgVector(vector),
+        match_threshold: SEARCH_THRESHOLD,
+        match_count: limit,
+        p_user_id: OWNER_USER_ID,
+      })
+      if (error) throw error
+      byMeaning = data ?? []
+    }
+
+    // 2. By exact words, for names and terms meaning can miss.
     const pattern = '%' + query.replace(/[\\%_]/g, m => '\\' + m) + '%'
-    const { data, error } = await db.from('thoughts')
+    const { data: byWords, error } = await db.from('thoughts')
       .select('id, content, created_at, category, tags, summary')
       .eq('user_id', OWNER_USER_ID)
       .ilike('content', pattern)
       .order('created_at', { ascending: false })
       .limit(limit)
     if (error) throw error
-    return data.length
-      ? `Found ${data.length} thought(s) containing "${query}":\n\n${formatList(data, query)}`
-      : `No thoughts contain "${query}". Try a different or shorter word.`
+
+    const seen = new Set(byMeaning.map(r => r.id))
+    const results: (Row & { similarity?: number })[] = [
+      ...byMeaning,
+      ...(byWords ?? []).filter(r => !seen.has(r.id)),
+    ].slice(0, limit)
+    if (!results.length) return `Nothing in the brain matches "${query}", by meaning or by exact words.`
+
+    // 3. The graph: what each result is linked to.
+    const ids = results.map(r => r.id)
+    const idList = ids.join(',')
+    const { data: links } = await db.from('thought_links')
+      .select('source_thought_id, target_thought_id, similarity_score')
+      .eq('user_id', OWNER_USER_ID)
+      .or(`source_thought_id.in.(${idList}),target_thought_id.in.(${idList})`)
+    const neighborsOf = new Map<string, { id: string; score: number }[]>()
+    for (const l of links ?? []) {
+      for (const [a, b] of [[l.source_thought_id, l.target_thought_id], [l.target_thought_id, l.source_thought_id]]) {
+        if (!ids.includes(a)) continue
+        if (!neighborsOf.has(a)) neighborsOf.set(a, [])
+        neighborsOf.get(a)!.push({ id: b, score: l.similarity_score })
+      }
+    }
+    const neighborIds = [...new Set([...neighborsOf.values()].flat().map(n => n.id))]
+    const neighborRows = new Map<string, { content: string; summary: string | null }>()
+    if (neighborIds.length) {
+      const { data } = await db.from('thoughts')
+        .select('id, content, summary').eq('user_id', OWNER_USER_ID).in('id', neighborIds)
+      for (const r of data ?? []) neighborRows.set(r.id, r)
+    }
+
+    const body = results.map((t, i) => {
+      const match = typeof t.similarity === 'number'
+        ? `${Math.round(t.similarity * 100)}% match by meaning`
+        : 'contains your exact words'
+      const linked = (neighborsOf.get(t.id) ?? [])
+        .filter(n => neighborRows.has(n.id))
+        .map(n => {
+          const r = neighborRows.get(n.id)!
+          return `   ↳ linked (${Math.round(n.score * 100)}%): ${(r.summary || r.content).replace(/\s+/g, ' ').slice(0, 160)} (id: ${n.id})`
+        })
+      return formatList([t], query).replace(/^1\. /, `${i + 1}. `).replace(/\n/, ` — ${match}\n`) +
+        (linked.length ? '\n' + linked.join('\n') : '')
+    }).join('\n\n')
+    return `Found ${results.length} thought(s) for "${query}":\n\n${body}`
   }
 
   if (name === 'list_recent') {
@@ -212,7 +274,8 @@ async function callTool(name: string, args: any): Promise<string> {
     if (!content) throw new Error('content is required')
     if (content.length > 100_000) throw new Error('That is too long to save as one thought.')
     const { data, error } = await db.from('thoughts')
-      .insert({ content, user_id: OWNER_USER_ID, metadata: { source: 'mcp' } })
+      .upsert({ content, user_id: OWNER_USER_ID, metadata: { source: 'mcp' } },
+        { onConflict: 'dedup_key,user_id', ignoreDuplicates: false })
       .select('id, created_at')
       .single()
     if (error) throw error

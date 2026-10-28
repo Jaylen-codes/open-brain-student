@@ -31,6 +31,7 @@
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { CaptureError, captureUrl, captureYouTube, extractVideoId } from '../_shared/capture.ts'
+import { searchBrain } from '../_shared/search.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!
 const SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
@@ -161,17 +162,13 @@ async function handleMessage(message: any): Promise<void> {
       await reply(chatId, 'What should I look for? Try: ?prayer')
       return
     }
-    // Escape the characters that mean "anything" to the database search
-    const pattern = '%' + query.replace(/[\\%_]/g, m => '\\' + m) + '%'
-    const { data, error } = await db
-      .from('thoughts').select('content, created_at')
-      .eq('user_id', OWNER_USER_ID)
-      .ilike('content', pattern)
-      .order('created_at', { ascending: false }).limit(5)
-    if (error) throw error
-    await reply(chatId, data && data.length
-      ? `🔍 Found ${data.length} for "${query}":\n\n` + data.map(formatThought).join('\n\n')
-      : `Nothing in your brain mentions "${query}" yet.`)
+    // By meaning first, then anything containing the exact words
+    const hits = await searchBrain(db, OWNER_USER_ID, query, 5)
+    await reply(chatId, hits.length
+      ? `🔍 Found ${hits.length} for "${query}":\n\n` + hits.map((h, i) =>
+          formatThought(h, i + 1) + (h.similarity !== null ? `\n(${Math.round(h.similarity * 100)}% match by meaning)` : '')
+        ).join('\n\n')
+      : `Nothing in your brain matches "${query}" yet.`)
     return
   }
 
@@ -200,11 +197,14 @@ async function handleMessage(message: any): Promise<void> {
     return
   }
 
-  const { error } = await db.from('thoughts').insert({
+  // upsert, not insert: the database refuses an identical second copy (for
+  // example when Telegram re-sends a message), so a repeat updates the
+  // existing thought instead of failing.
+  const { error } = await db.from('thoughts').upsert({
     content: text,
     user_id: OWNER_USER_ID,
     metadata: { source: 'telegram', telegram_message_id: message.message_id },
-  })
+  }, { onConflict: 'dedup_key,user_id', ignoreDuplicates: false })
   if (error) throw error
   await reply(chatId, '✅ Saved to your brain.')
 }

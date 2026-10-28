@@ -33,20 +33,23 @@ async function saveCapture(
   admin: Admin, userId: string, content: string, fullText: string,
   sourceKind: string, metadata: Record<string, unknown>,
 ): Promise<string> {
+  // upsert, not insert: capturing the same thing twice updates the existing
+  // thought instead of making a duplicate (the database refuses duplicates).
   const { data: thought, error } = await admin.from('thoughts')
-    .insert({ user_id: userId, content: content.slice(0, MAX_SAVED_CHARS), metadata })
+    .upsert({ user_id: userId, content: content.slice(0, MAX_SAVED_CHARS), metadata },
+      { onConflict: 'dedup_key,user_id', ignoreDuplicates: false })
     .select('id').single()
   if (error) throw error
 
   const text = fullText.slice(0, MAX_SAVED_CHARS)
-  const { error: srcErr } = await admin.from('thought_sources').insert({
+  const { error: srcErr } = await admin.from('thought_sources').upsert({
     thought_id: thought.id,
     user_id: userId,
     source_text: text,
     source_kind: sourceKind,
     char_count: text.length,
     truncated: fullText.length > MAX_SAVED_CHARS,
-  })
+  }, { onConflict: 'thought_id' })
   if (srcErr) console.warn('[capture] Saved the thought, but not its full source text:', srcErr.message)
   return thought.id
 }

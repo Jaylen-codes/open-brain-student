@@ -158,6 +158,9 @@
     .more { font-size: 0.75rem; color: #8b8df5; cursor: pointer; background: none; padding: 0; }
     .more:hover:not(:disabled) { background: none; color: #a5a6ff; }
     .empty { color: #333; font-size: 0.875rem; text-align: center; padding: 48px 0; }
+    .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+    .chip { font-size: 0.7rem; color: #9a9bf7; background: #1b1b33; border: 1px solid #2a2a4d; border-radius: 999px; padding: 2px 9px; }
+    .chip.cat { color: #ccc; background: #222; border-color: #333; }
     mark { background: #3b3b8f; color: #fff; border-radius: 3px; padding: 0 2px; }
     details.manual { border-top: 1px solid #222; padding-top: 12px; }
     details.manual summary { cursor: pointer; font-size: 0.85rem; color: #888; }
@@ -507,7 +510,11 @@
   async function insertThought(content, metadata) {
     const row = { content, user_id: user.id }
     if (metadata) row.metadata = metadata
-    const { data, error } = await db.from('thoughts').insert(row).select('id').single()
+    // upsert, not insert: the database refuses an identical second copy, so
+    // saving the same thing twice updates it instead of failing.
+    const { data, error } = await db.from('thoughts')
+      .upsert(row, { onConflict: 'dedup_key,user_id', ignoreDuplicates: false })
+      .select('id').single()
     if (error) throw error
     return data.id
   }
@@ -516,10 +523,10 @@
   // is already saved, so only warn.
   async function insertSource(thoughtId, text, kind) {
     try {
-      const { error } = await db.from('thought_sources').insert({
+      const { error } = await db.from('thought_sources').upsert({
         thought_id: thoughtId, user_id: user.id, source_text: text,
         source_kind: kind, char_count: text.length, truncated: false
-      })
+      }, { onConflict: 'thought_id' })
       if (error) throw error
     } catch (e) {
       console.warn('Saved the thought, but not its full source text:', e.message)
@@ -838,11 +845,17 @@
         body = body.replace(new RegExp(safe, 'gi'), m => '<mark>' + m + '</mark>')
       }
       const long = t.content.length > 400 || (t.content.match(/\n/g) || []).length > 6
+      const chips = (t.category ? '<span class="chip cat">' + esc(t.category) + '</span>' : '') +
+        (Array.isArray(t.tags) ? t.tags.map(x => '<span class="chip">' + esc(x) + '</span>').join('') : '')
+      const match = typeof t.similarity === 'number'
+        ? ' · ' + Math.round(t.similarity * 100) + '% match by meaning'
+        : (highlight && t.similarity === null ? ' · exact words' : '')
       return `
         <div class="thought">
           <div class="thought-text">${body}</div>
+          ${chips ? '<div class="chips">' + chips + '</div>' : ''}
           <div class="thought-foot">
-            <div class="thought-time">${fmt(t.created_at)}</div>
+            <div class="thought-time">${fmt(t.created_at)}${match}</div>
             ${long ? '<button class="more" onclick="toggleMore(this)">Show more</button>' : ''}
           </div>
         </div>`
@@ -859,7 +872,7 @@
     const list = document.getElementById('list')
     try {
       const { data, error } = await db
-        .from('thoughts').select('id, content, created_at')
+        .from('thoughts').select('id, content, created_at, category, tags, summary')
         .order('created_at', { ascending: false }).limit(20)
       if (error) throw error
       list.innerHTML = data && data.length
@@ -879,16 +892,18 @@
     if (!q) { clearSearch(); return }
     setMsg('searchMsg', 'Searching...')
     try {
-      // Escape the characters that mean "anything" to the database search
-      const pattern = '%' + q.replace(/[\\%_]/g, m => '\\' + m) + '%'
-      const { data, error } = await db
-        .from('thoughts').select('id, content, created_at')
-        .ilike('content', pattern)
-        .order('created_at', { ascending: false }).limit(50)
-      if (error) throw error
-      setMsg('searchMsg', data.length + (data.length === 1 ? ' result' : ' results'))
-      out.innerHTML = data.length
-        ? renderThoughts(data, q)
+      // Your server searches by meaning (and exact words) — only your thoughts
+      const { data, error } = await db.functions.invoke('search-brain', { body: { query: q, limit: 30 } })
+      if (error) {
+        let message = error.message
+        try { message = (await error.context.json()).error || message } catch (_) {}
+        throw new Error(message)
+      }
+      if (!data || !data.ok) throw new Error((data && data.error) || 'Search failed.')
+      const rows = data.results
+      setMsg('searchMsg', rows.length + (rows.length === 1 ? ' result' : ' results'))
+      out.innerHTML = rows.length
+        ? renderThoughts(rows, q)
         : '<div class="empty">Nothing matched "' + esc(q) + '".</div>'
       wrap.style.display = 'block'
     } catch (e) {
