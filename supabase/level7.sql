@@ -184,3 +184,28 @@ $$;
 
 revoke execute on function search_thoughts(text, uuid, vector, float, int, int) from public, anon, authenticated;
 grant execute on function search_thoughts(text, uuid, vector, float, int, int) to service_role;
+
+-- 4. FINISHER: once a minute, map any chunks still waiting --------------------
+-- A long capture's pieces are mapped a couple per call (free-plan time limits),
+-- so this nudges enrich-thought for up to 3 thoughts with waiting pieces. When
+-- nothing is waiting it does nothing. Already-tagged thoughts make no AI call,
+-- so this costs nothing.
+do $$
+begin
+  if exists (select 1 from cron.job where jobname = 'finish-chunks') then
+    perform cron.unschedule('finish-chunks');
+  end if;
+end $$;
+
+select cron.schedule(
+  'finish-chunks',
+  '* * * * *',
+  $CRON$
+    select net.http_post(
+      url := 'https://eompdnlidiaqivakumez.supabase.co/functions/v1/enrich-thought',
+      headers := '{"Content-Type": "application/json"}'::jsonb,
+      body := jsonb_build_object('id', w.thought_id, 'round', 60)
+    )
+    from (select distinct thought_id from thought_chunks where embedding is null limit 3) w;
+  $CRON$
+);
