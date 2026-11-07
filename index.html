@@ -127,6 +127,11 @@
     .yt-preview img { width: 120px; border-radius: 6px; flex-shrink: 0; }
     .yt-preview .t { font-size: 0.9rem; color: #ddd; line-height: 1.4; }
 
+    /* Coach */
+    .ask-q { background: #12121f; border-left: 3px solid #6366f1; border-radius: 8px; padding: 14px 16px; }
+    .ask-label { font-size: 0.7rem; color: #8b8df5; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 6px; }
+    .ask-text { font-size: 1.05rem; color: #fff; line-height: 1.45; }
+
     /* PDF drop zone */
     .drop {
       border: 2px dashed #2a2a2a; border-radius: 10px; padding: 32px 16px;
@@ -212,6 +217,7 @@
       <button class="tab active" data-tab="note">✍️ Note</button>
       <button class="tab" data-tab="voice">🎤 Voice</button>
       <button class="tab" data-tab="youtube">📹 YouTube</button>
+      <button class="tab" data-tab="ask">💬 Coach</button>
       <button class="tab" data-tab="pdf">📄 PDF</button>
       <button class="tab" data-tab="url">🔗 Link</button>
       <button class="tab" data-tab="search">🔍 Search</button>
@@ -273,6 +279,21 @@
           </div>
         </div>
       </details>
+    </div>
+
+    <!-- COACH: the AI interviews you so your brain learns who you are -->
+    <div class="panel card stack" id="panel-ask">
+      <div class="ask-q">
+        <div class="ask-label" id="askLabel">Your brain wants to know</div>
+        <div class="ask-text" id="askText">Thinking of a question...</div>
+      </div>
+      <textarea id="askAnswer" placeholder="Answer however you like — a sentence or a paragraph. Skip it if you'd rather not say." rows="4"></textarea>
+      <div class="row" style="margin-top:0">
+        <button id="askBtn" onclick="saveAnswer()">Save answer</button>
+        <button class="ghost" id="askSkipBtn" onclick="nextQuestion()">Different question</button>
+        <span class="msg" id="askMsg"></span>
+      </div>
+      <div class="hint">Questions come from what's already in your brain. Each answer is saved as a thought, so search and your AI tools can use it.</div>
     </div>
 
     <!-- PDF -->
@@ -505,6 +526,7 @@
       searching && document.getElementById('searchResults').innerHTML ? 'block' : 'none'
     if (searching) document.getElementById('searchInput').focus()
     if (t.dataset.tab !== 'voice' && listening) recognition.stop()
+    if (t.dataset.tab === 'ask' && !askQuestion) nextQuestion()
   })
 
   // ---------- saving ----------
@@ -722,6 +744,75 @@
       ytVideo = null
     })
   }
+
+  // ---------- Coach ----------
+  // Your server (the ask-me function) reads what's in your brain and asks one
+  // question to fill a gap. If that function isn't deployed yet, or the AI
+  // call fails, a built-in starter question is used instead.
+
+  const STARTER_QUESTIONS = [
+    'What are you working toward right now, and why does it matter to you?',
+    'What does a really good day look like for you, start to finish?',
+    'Who are the people you count on most, and what do they bring to your life?',
+    'What is something you believe that most people around you don\'t?',
+    'How do you like to learn something new — reading, watching, doing, talking it through?',
+    'What drains your energy fastest, and what recharges it?',
+    'What is a decision you\'re weighing right now?',
+    'What skill do you most want to get better at this year?',
+    'What would you do with a completely free week?',
+    'What kind of feedback actually helps you, and what kind doesn\'t?',
+    'What are you proud of that you don\'t talk about much?',
+    'What does success look like for you five years from now?',
+  ]
+  let askQuestion = ''
+  let askFromAI = false
+  const askedThisVisit = []
+
+  function starterQuestion() {
+    const fresh = STARTER_QUESTIONS.filter(q => !askedThisVisit.includes(q))
+    const pool = fresh.length ? fresh : STARTER_QUESTIONS
+    return pool[Math.floor(Math.random() * pool.length)]
+  }
+
+  async function nextQuestion() {
+    const text = document.getElementById('askText')
+    const skip = document.getElementById('askSkipBtn')
+    skip.disabled = true
+    text.textContent = 'Thinking of a question...'
+    setMsg('askMsg', '')
+    try {
+      const { data, error } = await db.functions.invoke('ask-me', { body: { skip: askedThisVisit.slice(-10) } })
+      if (error || !data || !data.ok || !data.question) throw new Error((data && data.error) || (error && error.message) || 'no question')
+      askQuestion = data.question
+      askFromAI = true
+    } catch (e) {
+      console.warn('ask-me unavailable, using a starter question:', e.message)
+      askQuestion = starterQuestion()
+      askFromAI = false
+    }
+    askedThisVisit.push(askQuestion)
+    text.textContent = askQuestion
+    document.getElementById('askLabel').textContent = askFromAI ? 'Your brain wants to know' : 'Starter question'
+    skip.disabled = false
+    document.getElementById('askAnswer').focus()
+  }
+
+  function saveAnswer() {
+    const el = document.getElementById('askAnswer')
+    const answer = el.value.trim()
+    if (!askQuestion) return
+    if (!answer) { setMsg('askMsg', 'Type an answer first, or tap "Different question".', 'err'); return }
+    const question = askQuestion
+    withSaving('askBtn', 'askMsg', async () => {
+      await insertThought('💬 About me\nQ: ' + question + '\n\nA: ' + answer,
+        { source: 'interview', question, ai_question: askFromAI })
+      el.value = ''
+      setTimeout(nextQuestion, 900)
+    })
+  }
+  document.getElementById('askAnswer').addEventListener('keydown', e => {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') saveAnswer()
+  })
 
   // ---------- PDF ----------
 
