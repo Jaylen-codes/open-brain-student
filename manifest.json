@@ -1,11 +1,11 @@
 {
-  "name": "My Open Brain",
-  "short_name": "Open Brain",
-  "start_url": "./",
+  "name": "Open Brain Command Center",
+  "short_name": "Command Center",
+  "start_url": "./command.html",
   "scope": "./",
   "display": "standalone",
-  "background_color": "#0f0f0f",
-  "theme_color": "#6366f1",
+  "background_color": "#070b14",
+  "theme_color": "#070b14",
   "icons": [
     {
       "src": "icon-192.png",
@@ -18,6 +18,16 @@
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "any maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Command Center",
+      "url": "./command.html"
+    },
+    {
+      "name": "Capture a thought",
+      "url": "./index.html"
     }
   ]
 }

@@ -1,0 +1,989 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>Command Center</title>
+  <meta name="theme-color" content="#070b14">
+  <link rel="manifest" href="manifest.json">
+  <link rel="apple-touch-icon" href="icon-192.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Command Center">
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
+  <script src="config.js"></script>
+  <style>
+    :root {
+      --bg: #070b14; --bg2: #0c1322; --panel: #0f1829; --line: #1c2a44;
+      --text: #e6edf7; --muted: #7d8ba5; --cyan: #22d3ee; --cyan-dim: rgba(34,211,238,.18);
+      --gold: #f5b544; --gold-dim: rgba(245,181,68,.18); --pink: #f472b6;
+      --green: #34d399; --amber: #fbbf24; --slate: #64748b; --red: #f87171;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, sans-serif;
+      background: var(--bg); color: var(--text); overflow: hidden;
+    }
+    button { font: inherit; cursor: pointer; }
+    input, textarea, select {
+      font: inherit; color: var(--text); background: var(--bg2); border: 1px solid var(--line);
+      border-radius: 8px; padding: 9px 11px; width: 100%;
+    }
+    textarea { resize: vertical; min-height: 70px; }
+    input:focus, textarea:focus, select:focus { outline: none; border-color: var(--cyan); }
+    a { color: var(--cyan); }
+
+    /* ---------- background: soft grid + glow, like the reference, minus the noise ---------- */
+    .stage {
+      position: fixed; inset: 0;
+      background:
+        radial-gradient(ellipse 60% 50% at 50% 55%, rgba(34,211,238,.10), transparent 70%),
+        linear-gradient(rgba(255,255,255,.025) 1px, transparent 1px) 0 0 / 48px 48px,
+        linear-gradient(90deg, rgba(255,255,255,.025) 1px, transparent 1px) 0 0 / 48px 48px,
+        var(--bg);
+    }
+
+    /* ---------- top bar ---------- */
+    .topbar {
+      position: fixed; top: 0; left: 0; right: 0; z-index: 20;
+      display: flex; align-items: center; gap: 10px; padding: 14px 16px;
+      padding-top: max(14px, env(safe-area-inset-top));
+      background: linear-gradient(var(--bg) 40%, transparent);
+    }
+    .brand { font-weight: 700; letter-spacing: .02em; font-size: 1.05rem; }
+    .brand small { display: block; font-weight: 400; color: var(--muted); font-size: .72rem; letter-spacing: 0; }
+    .spacer { flex: 1; }
+    .btn {
+      background: var(--panel); color: var(--text); border: 1px solid var(--line);
+      border-radius: 10px; padding: 8px 13px; font-size: .85rem; white-space: nowrap;
+    }
+    .btn:hover { border-color: var(--cyan); }
+    .btn.primary { background: var(--cyan); color: #04222a; border-color: var(--cyan); font-weight: 600; }
+    .btn.gold { background: var(--gold); color: #2a1a00; border-color: var(--gold); font-weight: 600; }
+    .btn.ghost { background: transparent; }
+    .btn.danger { color: var(--red); }
+    .btn:disabled { opacity: .5; cursor: wait; }
+    .live { display: inline-flex; align-items: center; gap: 6px; font-size: .75rem; color: var(--muted); }
+    .live i { width: 7px; height: 7px; border-radius: 50%; background: var(--slate); }
+    .live.on i { background: var(--green); box-shadow: 0 0 8px var(--green); }
+
+    /* ---------- the map ---------- */
+    #map { position: fixed; inset: 0; }
+    #wires { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+    .wire { fill: none; stroke-width: 1.6; stroke-linecap: round; }
+    .wire.flow { stroke-dasharray: 4 10; animation: flow 1.6s linear infinite; }
+    .wire.board { stroke: var(--gold); opacity: .55; }
+    .wire.agent { stroke: var(--cyan); opacity: .45; }
+    .wire.child { stroke: var(--cyan); opacity: .3; }
+    .wire.coach { stroke: var(--pink); opacity: .5; }
+    .wire.dim { opacity: .15; animation: none; }
+    @keyframes flow { to { stroke-dashoffset: -28; } }
+
+    .node {
+      position: absolute; transform: translate(-50%, -50%);
+      display: flex; flex-direction: column; align-items: center; gap: 8px;
+      background: none; border: none; color: var(--text); width: 132px; text-align: center;
+      transition: transform .15s;
+    }
+    .node:hover { transform: translate(-50%, -50%) scale(1.05); }
+    .cube {
+      position: relative; width: 64px; height: 64px; border-radius: 16px;
+      display: grid; place-items: center; font-size: 30px;
+      background: linear-gradient(160deg, rgba(34,211,238,.22), rgba(34,211,238,.05));
+      border: 1px solid rgba(34,211,238,.55);
+      box-shadow: 0 0 24px rgba(34,211,238,.25), inset 0 0 18px rgba(34,211,238,.12);
+    }
+    .cube::after { /* the little "server base" under each cube */
+      content: ''; position: absolute; left: 6px; right: 6px; bottom: -9px; height: 7px;
+      border-radius: 0 0 6px 6px; background: #121d31; border: 1px solid var(--line); border-top: none;
+    }
+    .node.section .cube { width: 72px; height: 72px; border-radius: 18px; }
+    .node.board .cube {
+      background: linear-gradient(160deg, rgba(245,181,68,.25), rgba(245,181,68,.05));
+      border-color: rgba(245,181,68,.65); box-shadow: 0 0 24px rgba(245,181,68,.25), inset 0 0 18px rgba(245,181,68,.12);
+    }
+    .node.child { width: 104px; }
+    .node.child .cube { width: 46px; height: 46px; font-size: 22px; border-radius: 12px; }
+    .node.child .cube::after { display: none; }
+    .node.coach .cube {
+      width: 50px; height: 50px; border-radius: 50%; font-size: 24px;
+      background: radial-gradient(circle, rgba(244,114,182,.35), rgba(244,114,182,.06));
+      border-color: rgba(244,114,182,.7); box-shadow: 0 0 22px rgba(244,114,182,.35);
+    }
+    .node.coach .cube::after { display: none; }
+    .node .label { font-size: .8rem; font-weight: 600; letter-spacing: .03em; text-transform: uppercase; line-height: 1.2; }
+    .node.child .label { font-size: .7rem; }
+    .node .sub { font-size: .7rem; color: var(--muted); margin-top: -4px; }
+    .sdot { position: absolute; top: -4px; right: -4px; width: 12px; height: 12px; border-radius: 50%;
+            border: 2px solid var(--bg); background: var(--slate); }
+    .sdot.active { background: var(--green); box-shadow: 0 0 8px var(--green); }
+    .sdot.building { background: var(--amber); }
+    .sdot.paused { background: var(--red); }
+    .verdict-pill { font-size: .65rem; padding: 2px 7px; border-radius: 99px; margin-top: -4px; font-weight: 600; }
+    .v-aligned { background: rgba(52,211,153,.15); color: var(--green); }
+    .v-caution { background: rgba(251,191,36,.15); color: var(--amber); }
+    .v-conflict { background: rgba(248,113,113,.15); color: var(--red); }
+    .v-info { background: var(--cyan-dim); color: var(--cyan); }
+
+    /* the brain */
+    .brain { width: 190px; }
+    .brain .core {
+      position: relative; width: 132px; height: 132px; border-radius: 30px;
+      display: grid; place-items: center;
+      background: linear-gradient(160deg, #0e2a3a, #0a1626);
+      border: 1.5px solid rgba(34,211,238,.8);
+      box-shadow: 0 0 60px rgba(34,211,238,.35), inset 0 0 40px rgba(34,211,238,.2);
+      animation: pulse 4s ease-in-out infinite;
+    }
+    .brain .core::before { /* the chip base */
+      content: ''; position: absolute; inset: -16px; border-radius: 38px;
+      border: 1px dashed rgba(34,211,238,.35);
+    }
+    .brain .core span { font-size: 54px; filter: drop-shadow(0 0 12px rgba(34,211,238,.8)); }
+    .brain .label { font-size: .95rem; }
+    .brain.ping .core { animation: ping .9s ease-out; }
+    @keyframes pulse { 50% { box-shadow: 0 0 80px rgba(34,211,238,.5), inset 0 0 50px rgba(34,211,238,.28); } }
+    @keyframes ping { 0% { box-shadow: 0 0 0 0 rgba(34,211,238,.9); } 100% { box-shadow: 0 0 0 40px rgba(34,211,238,0); } }
+
+    .board-title {
+      position: absolute; transform: translate(-50%, -50%); font-size: .68rem; letter-spacing: .22em;
+      color: var(--gold); text-transform: uppercase; white-space: nowrap; opacity: .85;
+    }
+    .add-orb {
+      position: absolute; transform: translate(-50%, -50%); width: 44px; height: 44px; border-radius: 50%;
+      border: 1px dashed var(--muted); background: transparent; color: var(--muted); font-size: 22px;
+    }
+    .add-orb:hover { color: var(--cyan); border-color: var(--cyan); }
+
+    /* phone: the map becomes a tidy stack */
+    #stack { display: none; position: fixed; inset: 0; overflow-y: auto; padding: 84px 16px 40px; }
+    .stack-group { margin-bottom: 22px; }
+    .stack-group h3 { font-size: .7rem; letter-spacing: .2em; text-transform: uppercase; color: var(--muted); margin-bottom: 10px; }
+    .stack-group.boardg h3 { color: var(--gold); }
+    .row-card {
+      width: 100%; display: flex; align-items: center; gap: 12px; text-align: left;
+      background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 12px; color: var(--text);
+      margin-bottom: 8px; position: relative;
+    }
+    .row-card .cube { width: 44px; height: 44px; font-size: 22px; flex-shrink: 0; border-radius: 12px; }
+    .row-card .cube::after { display: none; }
+    .row-card.board .cube { background: var(--gold-dim); border-color: rgba(245,181,68,.6); box-shadow: none; }
+    .row-card .t { font-weight: 600; }
+    .row-card .d { font-size: .8rem; color: var(--muted); }
+    .row-card.child { margin-left: 26px; width: calc(100% - 26px); }
+    @media (max-width: 759px) {
+      #map { display: none; } #stack { display: block; padding-top: 92px; } .hide-sm { display: none; }
+      .brand small { display: none; } .topbar { background: var(--bg); border-bottom: 1px solid var(--line); }
+    }
+    /* cubes are glass, but lines shouldn't show through them */
+    .node .cube, .brain .core { background-color: #0b1626 !important; }
+
+    /* ---------- drawer ---------- */
+    .drawer {
+      position: fixed; top: 0; right: 0; bottom: 0; width: min(460px, 100%); z-index: 40;
+      background: var(--panel); border-left: 1px solid var(--line);
+      transform: translateX(105%); transition: transform .25s ease; display: flex; flex-direction: column;
+    }
+    .drawer.open { transform: none; box-shadow: -20px 0 60px rgba(0,0,0,.5); }
+    .dhead { display: flex; align-items: center; gap: 12px; padding: 18px 18px 14px; border-bottom: 1px solid var(--line);
+             padding-top: max(18px, env(safe-area-inset-top)); }
+    .dhead .cube { width: 48px; height: 48px; font-size: 24px; flex-shrink: 0; border-radius: 12px; }
+    .dhead .cube::after { display: none; }
+    .dhead .cube.board-cube { background: var(--gold-dim); border-color: rgba(245,181,68,.65); box-shadow: 0 0 18px rgba(245,181,68,.25); }
+    .dhead h2 { font-size: 1.1rem; }
+    .dhead .kind { font-size: .7rem; color: var(--muted); text-transform: uppercase; letter-spacing: .12em; }
+    .dbody { flex: 1; overflow-y: auto; padding: 16px 18px 40px; }
+    .dsec { margin-bottom: 22px; }
+    .dsec > h4 { font-size: .7rem; text-transform: uppercase; letter-spacing: .14em; color: var(--muted); margin-bottom: 9px;
+                 display: flex; align-items: center; justify-content: space-between; }
+    .dsec p { line-height: 1.5; font-size: .92rem; color: #c8d3e6; white-space: pre-wrap; }
+    .x { background: none; border: none; color: var(--muted); font-size: 22px; line-height: 1; padding: 4px; }
+    .conn { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border: 1px solid var(--line);
+            border-radius: 10px; margin-bottom: 7px; background: var(--bg2); }
+    .conn .sys { font-weight: 600; font-size: .9rem; }
+    .conn .det { font-size: .78rem; color: var(--muted); word-break: break-word; }
+    .acc { font-size: .66rem; padding: 2px 7px; border-radius: 99px; background: var(--cyan-dim); color: var(--cyan); white-space: nowrap; }
+    .acc.write, .acc.readwrite { background: rgba(251,191,36,.15); color: var(--amber); }
+    .acc.admin { background: rgba(248,113,113,.15); color: var(--red); }
+    .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .stack8 > * + * { margin-top: 8px; }
+    .review { border: 1px solid var(--line); border-radius: 12px; padding: 12px; margin-bottom: 9px; background: var(--bg2); }
+    .review .top { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: .8rem; }
+    .review .who { font-weight: 600; }
+    .review .when { color: var(--muted); margin-left: auto; font-size: .72rem; }
+    .review .sum { margin-top: 8px; font-size: .9rem; line-height: 1.5; color: #c8d3e6; white-space: pre-wrap; }
+    .review .subj { margin-top: 6px; font-size: .75rem; color: var(--muted); }
+    .review details { margin-top: 8px; font-size: .85rem; }
+    .review summary { color: var(--cyan); cursor: pointer; font-size: .8rem; }
+    .review ul { margin: 6px 0 4px 18px; line-height: 1.5; color: #c8d3e6; }
+    .review .lbl { font-size: .7rem; text-transform: uppercase; letter-spacing: .1em; color: var(--muted); margin-top: 8px; }
+    .msg { font-size: .82rem; margin-top: 8px; min-height: 1em; }
+    .msg.err { color: var(--red); } .msg.ok { color: var(--green); }
+    .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+    .stat { background: var(--bg2); border: 1px solid var(--line); border-radius: 10px; padding: 10px; }
+    .stat b { display: block; font-size: 1.3rem; }
+    .stat span { font-size: .72rem; color: var(--muted); }
+    .thought { font-size: .85rem; padding: 9px 0; border-bottom: 1px solid var(--line); color: #c8d3e6; }
+    .thought small { color: var(--muted); display: block; font-size: .72rem; }
+
+    /* coach chat */
+    .chat { display: flex; flex-direction: column; gap: 10px; }
+    .bubble { padding: 10px 13px; border-radius: 14px; font-size: .9rem; line-height: 1.5; max-width: 92%; word-wrap: break-word; }
+    .bubble.user { align-self: flex-end; background: rgba(244,114,182,.15); border: 1px solid rgba(244,114,182,.35); white-space: pre-wrap; }
+    .bubble.assistant { align-self: flex-start; background: var(--bg2); border: 1px solid var(--line); }
+    .bubble.assistant ul { margin: 4px 0 4px 18px; }
+    .bubble.assistant p + p { margin-top: 6px; }
+    .proposal { margin-top: 8px; border: 1px dashed var(--cyan); border-radius: 10px; padding: 9px; display: flex; gap: 8px; align-items: center; }
+    .proposal div { flex: 1; font-size: .82rem; }
+    .chatbar { border-top: 1px solid var(--line); padding: 12px 14px; padding-bottom: max(12px, env(safe-area-inset-bottom)); display: flex; gap: 8px; }
+    .chatbar textarea { min-height: 44px; max-height: 140px; }
+    .typing { color: var(--muted); font-size: .85rem; }
+
+    /* modal + overlay + auth + toast */
+    .scrim { position: fixed; inset: 0; background: rgba(2,6,14,.6); z-index: 35; display: none; }
+    .scrim.on { display: block; }
+    .center-card {
+      position: fixed; z-index: 50; left: 50%; top: 50%; transform: translate(-50%, -50%);
+      width: min(420px, calc(100% - 32px)); background: var(--panel); border: 1px solid var(--line);
+      border-radius: 16px; padding: 22px; display: none; max-height: 90vh; overflow-y: auto;
+    }
+    .center-card.on { display: block; }
+    .center-card h2 { font-size: 1.1rem; margin-bottom: 14px; }
+    label.f { display: block; font-size: .75rem; color: var(--muted); margin: 10px 0 5px; }
+    .toast { position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%); z-index: 60;
+             background: var(--panel); border: 1px solid var(--cyan); border-radius: 12px; padding: 10px 16px;
+             font-size: .85rem; max-width: calc(100% - 32px); display: none; }
+    .toast.on { display: block; }
+    .empty { color: var(--muted); font-size: .85rem; }
+  </style>
+</head>
+<body>
+  <div class="stage"></div>
+
+  <div class="topbar">
+    <div class="brand">⚡ Command Center <small>Your brain, your agents, your board</small></div>
+    <div class="spacer"></div>
+    <span class="live hide-sm" id="live"><i></i><span>Offline</span></span>
+    <button class="btn" id="addBtn" style="display:none">＋ Add</button>
+    <button class="btn" id="coachBtn" style="display:none">🧠 Coach</button>
+    <a class="btn ghost hide-sm" href="index.html" style="text-decoration:none">✍️ Capture</a>
+  </div>
+
+  <div id="map"><svg id="wires"></svg></div>
+  <div id="stack"></div>
+
+  <div class="scrim" id="scrim"></div>
+  <aside class="drawer" id="drawer"></aside>
+
+  <!-- sign in -->
+  <div class="center-card" id="authCard">
+    <h2>Sign in to your brain</h2>
+    <label class="f">Email</label><input id="authEmail" type="email" autocomplete="email">
+    <label class="f">Password</label><input id="authPass" type="password" autocomplete="current-password">
+    <div style="margin-top:14px; display:flex; gap:8px"><button class="btn primary" id="authGo">Sign in</button>
+      <a class="btn ghost" href="index.html" style="text-decoration:none">Create account</a></div>
+    <div class="msg" id="authMsg"></div>
+  </div>
+
+  <!-- add / edit -->
+  <div class="center-card" id="editCard"></div>
+
+  <div class="toast" id="toast"></div>
+
+<script>
+// ============================================================================
+// COMMAND CENTER
+//   Data:   cc_nodes / cc_connections / cc_reviews / cc_chat (command-center.sql)
+//   Brain:  your thoughts table — counts, recent captures, live pings
+//   Server: board-review, coach-chat, market-brief (supabase/functions)
+// Everything updates live: change something anywhere and the map redraws.
+// ============================================================================
+let db, user
+let nodes = [], conns = [], reviews = [], chat = [], brain = { count: 0, recent: [], sources: {} }
+let openPanel = null   // { type: 'node'|'brain'|'coach', id }
+let channel
+
+const $ = id => document.getElementById(id)
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
+const ago = iso => {
+  const s = (Date.now() - new Date(iso)) / 1000
+  if (s < 60) return 'just now'
+  if (s < 3600) return Math.floor(s / 60) + 'm ago'
+  if (s < 86400) return Math.floor(s / 3600) + 'h ago'
+  return Math.floor(s / 86400) + 'd ago'
+}
+function toast(text, ms = 3500) {
+  const t = $('toast'); t.textContent = text; t.classList.add('on')
+  clearTimeout(toast.h); toast.h = setTimeout(() => t.classList.remove('on'), ms)
+}
+async function callFn(name, body) {
+  const { data, error } = await db.functions.invoke(name, { body })
+  if (error) {
+    let message = error.message
+    try { message = (await error.context.json()).error || message } catch (_) {}
+    throw new Error(message)
+  }
+  if (!data || !data.ok) throw new Error((data && data.error) || 'Something went wrong.')
+  return data
+}
+
+// ---------------------------------------------------------------------------
+// Starting lineup — created once, the first time you open the Command Center.
+// Edit any of it from the map.
+// ---------------------------------------------------------------------------
+const SEED = {
+  board: [
+    { name: 'Scripture', emoji: '📖', sort: 1, status: 'active', runs_on: 'Claude',
+      description: 'Judges every idea against the Bible and how it lines up morally with what you follow.',
+      instructions: `You are a wise, humble, non-denominational evangelical Christian advisor. Judge the owner's ideas, businesses and systems against Scripture, quoting the ESV or NIV with book, chapter and verse.
+- Separate three things clearly: what Scripture plainly commands or forbids; wisdom principles (Proverbs, stewardship, integrity); and disputable matters where believers differ (Romans 14).
+- Weigh honesty and integrity (Proverbs 11:1, Colossians 3:23), love of money and get-rich-quick thinking (1 Timothy 6:9-10, Proverbs 13:11, 28:20), stewardship (Luke 16:10-11), how it treats other people (Philippians 2:3-4), and whether it could cause someone to stumble.
+- For sports betting and arbitrage specifically: give an honest, balanced view. Scripture does not name gambling, but speak plainly to motives, risk to the household, addiction risk, honesty with sportsbooks, and stewardship.
+- Speak with grace, not legalism. Encourage what is good. When something conflicts, say so clearly and offer a faithful alternative.`,
+      conns: [{ system: 'Bible (ESV / NIV)', access: 'read', detail: 'Scripture reference' }] },
+    { name: 'Finance', emoji: '📊', sort: 2, status: 'active', runs_on: 'Claude + web search',
+      description: 'A finance professional who follows the markets daily and tells you how to approach money in everything you do.',
+      instructions: `You are a CFA-level financial advisor who reads the markets every morning. Judge ideas on cash flow, risk, opportunity cost, taxes and downside protection.
+- For ArbCity (sports arbitrage): bankroll management and position sizing, sportsbook limits and account health, counterparty/withdrawal risk, record keeping, and taxes on gambling winnings.
+- For 5 Star and any business: unit economics, pricing, what an AI agent saves or costs, and runway.
+- For personal finances: emergency fund first, debt, then investing. Hold the owner to their stated goals.
+- Use current market data when it matters, and cite it. Be conservative and blunt about risk. Never invent numbers.`,
+      conns: [{ system: 'Web', access: 'read', detail: 'live market data and financial news' },
+              { system: 'Open Brain', access: 'read', detail: 'goals, ArbCity notes' }] },
+    { name: 'Tester', emoji: '🧪', sort: 3, status: 'active', runs_on: 'Claude + GitHub',
+      description: 'Checks your code, tests your assumptions, and asks whether you are even asking the right questions.',
+      instructions: `You are a senior QA engineer and red-team reviewer. Your job is to find what breaks before it ships — in code, in plans, and in thinking.
+- Code: read the connected repos. Look for bugs, missing tests, exposed secrets, over-broad access (agents should get the least access they need), and missing error handling. Name files.
+- Plans: list the assumptions, then attack the weakest one. What happens on a bad day: an outage, an angry client, a sportsbook freezing an account, an AI agent giving a wrong answer to a customer?
+- Questions: is the owner solving the right problem? Offer the better question they should be asking.
+- Finish with a short, concrete test plan: what to test, how, and what "pass" looks like.`,
+      conns: [{ system: 'GitHub', access: 'read', detail: 'jaylen-codes/open-brain-student', url: 'https://github.com/jaylen-codes/open-brain-student' }] },
+  ],
+  sections: [
+    { name: '5 Star', emoji: '⭐', sort: 1, status: 'building', runs_on: '',
+      description: 'The 5 Star business — client support and operations.',
+      conns: [{ system: 'Zendesk', access: 'read/write', detail: 'support tickets' }],
+      agents: [{ name: 'Zendesk Agent', emoji: '🎧', status: 'planned', runs_on: 'Claude',
+        description: 'Monitors Zendesk and answers client questions.',
+        instructions: 'Watch new Zendesk tickets, answer common client questions using the 5 Star knowledge base, and hand anything sensitive (refunds, complaints, legal) to a human.',
+        conns: [{ system: 'Zendesk', access: 'read/write', detail: 'read tickets, post replies' },
+                { system: 'Open Brain', access: 'read', detail: '5 Star FAQs and policies' }] }] },
+    { name: 'ArbCity', emoji: '🎯', sort: 2, status: 'building', runs_on: '',
+      description: 'Your sports arbitrage betting business — bankroll, books and results.',
+      conns: [{ system: 'Sportsbooks', access: 'read', detail: 'balances and odds' },
+              { system: 'Open Brain', access: 'read/write', detail: 'bet log, bankroll notes' }],
+      agents: [] },
+    { name: 'iCloud Sync', emoji: '☁️', sort: 3, status: 'planned', runs_on: 'Your Mac (every 15 min)',
+      description: 'Sends Apple Notes, Reminders, Calendar and your iCloud Drive "Brain" folder into your brain automatically.',
+      conns: [{ system: 'Apple Notes', access: 'read', detail: '' }, { system: 'Reminders', access: 'read', detail: '' },
+              { system: 'Calendar', access: 'read', detail: 'next 14 days' }, { system: 'iCloud Drive', access: 'read', detail: '/Brain folder' },
+              { system: 'Open Brain', access: 'write', detail: 'via icloud-ingest' }],
+      agents: [] },
+  ],
+}
+
+async function insertNode(n, parent_id = null, kind) {
+  const { conns: c = [], agents = [], ...fields } = n
+  const { data, error } = await db.from('cc_nodes').insert({ ...fields, kind, parent_id }).select('id').single()
+  if (error) throw error
+  if (c.length) {
+    const { error: e2 } = await db.from('cc_connections').insert(c.map(x => ({ ...x, node_id: data.id })))
+    if (e2) throw e2
+  }
+  for (const a of agents) await insertNode(a, data.id, 'agent')
+  return data.id
+}
+
+async function seedIfEmpty() {
+  const { count, error } = await db.from('cc_nodes').select('id', { count: 'exact', head: true })
+  if (error) throw error
+  if (count) return
+  for (const b of SEED.board) await insertNode(b, null, 'board')
+  for (const s of SEED.sections) await insertNode(s, null, 'section')
+}
+
+// ---------------------------------------------------------------------------
+// Loading
+// ---------------------------------------------------------------------------
+async function loadAll() {
+  const [n, c, r, ch, tc, tr] = await Promise.all([
+    db.from('cc_nodes').select('*').order('sort').order('created_at'),
+    db.from('cc_connections').select('*').order('created_at'),
+    db.from('cc_reviews').select('*').order('created_at', { ascending: false }).limit(200),
+    db.from('cc_chat').select('*').order('created_at', { ascending: false }).limit(60),
+    db.from('thoughts').select('id', { count: 'exact', head: true }),
+    db.from('thoughts').select('id, content, summary, category, metadata, created_at').order('created_at', { ascending: false }).limit(40),
+  ])
+  for (const x of [n, c, r, ch, tc, tr]) if (x.error) throw x.error
+  nodes = n.data; conns = c.data; reviews = r.data; chat = ch.data.reverse()
+  brain.count = tc.count ?? 0
+  brain.recent = tr.data
+  brain.sources = {}
+  for (const t of tr.data) {
+    const s = (t.metadata && t.metadata.source) || 'app'
+    brain.sources[s] = (brain.sources[s] || 0) + 1
+  }
+  render()
+}
+
+let reloadTimer
+function scheduleReload() { clearTimeout(reloadTimer); reloadTimer = setTimeout(() => loadAll().catch(console.error), 250) }
+
+function subscribe() {
+  if (channel) db.removeChannel(channel)
+  channel = db.channel('command-center')
+  for (const table of ['cc_nodes', 'cc_connections', 'cc_reviews', 'cc_chat']) {
+    channel.on('postgres_changes', { event: '*', schema: 'public', table, filter: `user_id=eq.${user.id}` }, scheduleReload)
+  }
+  channel.on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'thoughts', filter: `user_id=eq.${user.id}` }, payload => {
+    const b = document.querySelector('.brain'); if (b) { b.classList.remove('ping'); void b.offsetWidth; b.classList.add('ping') }
+    const text = String(payload.new.content || '').split('\n')[0].slice(0, 80)
+    toast('🧠 New in your brain: ' + text)
+    scheduleReload()
+  })
+  channel.subscribe(status => {
+    const on = status === 'SUBSCRIBED'
+    $('live').className = 'live hide-sm' + (on ? ' on' : '')
+    $('live').querySelector('span').textContent = on ? 'Live' : 'Reconnecting…'
+  })
+}
+
+// ---------------------------------------------------------------------------
+// Helpers on the data
+// ---------------------------------------------------------------------------
+const byKind = k => nodes.filter(n => n.kind === k)
+const childrenOf = id => nodes.filter(n => n.kind === 'agent' && n.parent_id === id)
+const looseAgents = () => nodes.filter(n => n.kind === 'agent' && (!n.parent_id || !nodes.some(s => s.id === n.parent_id && s.kind === 'section')))
+const connsOf = id => conns.filter(c => c.node_id === id)
+const reviewsFor = n => reviews.filter(r => n.kind === 'board' ? r.member_id === n.id : r.node_id === n.id)
+const latestVerdict = n => reviews.find(r => r.member_id === n.id && r.verdict)
+const nodeById = id => nodes.find(n => n.id === id)
+
+// ---------------------------------------------------------------------------
+// Rendering: the map (wide screens) and the stack (phones)
+// ---------------------------------------------------------------------------
+function render() {
+  renderMap()
+  renderStack()
+  if (openPanel) refreshPanel()
+}
+
+function nodeHtml(n, cls, x, y) {
+  const v = n.kind === 'board' ? latestVerdict(n) : null
+  const kids = n.kind === 'section' ? childrenOf(n.id).length : 0
+  const sub = n.kind === 'board'
+    ? (v ? `<span class="verdict-pill v-${esc(v.verdict)}">${esc(v.verdict)} · ${v.score}/10</span>` : '<span class="sub">no verdicts yet</span>')
+    : `<span class="sub">${connsOf(n.id).length} connection${connsOf(n.id).length === 1 ? '' : 's'}${kids ? ` · ${kids} agent${kids === 1 ? '' : 's'}` : ''}</span>`
+  return `<button class="node ${cls}" style="left:${x}px;top:${y}px" data-id="${n.id}">
+    <div class="cube">${esc(n.emoji || '🤖')}<span class="sdot ${esc(n.status)}"></span></div>
+    <div class="label">${esc(n.name)}</div>${sub}</button>`
+}
+
+function curve(x1, y1, x2, y2, cls) {
+  const mx = (x1 + x2) / 2, my = (y1 + y2) / 2
+  // a gentle right-angle-ish circuit trace
+  const d = Math.abs(x2 - x1) > Math.abs(y2 - y1)
+    ? `M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2},${y2}`
+    : `M${x1},${y1} C${x1},${my} ${x2},${my} ${x2},${y2}`
+  return `<path class="wire ${cls}" d="${d}"/>`
+}
+
+function renderMap() {
+  const map = $('map')
+  const W = map.clientWidth, H = map.clientHeight
+  if (!W) return
+  const cx = W / 2, cy = H * 0.56
+  const board = byKind('board')
+  const ring = [...byKind('section'), ...looseAgents()]
+  const rx = Math.min(W * 0.36, 520), ry = Math.min(H * 0.30, 300)
+
+  let html = '', wires = ''
+
+  // Board: a row above the brain, joined by a gold bus line
+  const by = Math.max(150, cy - ry - 105)
+  const span = Math.min(W - 160, Math.max(board.length - 1, 1) * 190)
+  html += `<div class="board-title" style="left:${cx}px;top:${by - 62}px">Board of Directors</div>`
+  board.forEach((b, i) => {
+    const x = board.length === 1 ? cx : cx - span / 2 + (span * i) / (board.length - 1)
+    wires += curve(x, by + 34, cx, cy - 80, 'board flow')
+    html += nodeHtml(b, 'board', x, by)
+  })
+
+  // Sections + loose agents on an arc below and around the brain
+  const a0 = -18 * Math.PI / 180, a1 = 198 * Math.PI / 180
+  ring.forEach((n, i) => {
+    const a = ring.length === 1 ? Math.PI / 2 : a0 + (a1 - a0) * (i / (ring.length - 1))
+    const x = cx + rx * Math.cos(a), y = cy + ry * Math.sin(a) + 10
+    wires += curve(cx, cy, x, y, `agent ${n.status === 'active' ? 'flow' : ''} ${n.status === 'paused' ? 'dim' : ''}`)
+    html += nodeHtml(n, n.kind === 'section' ? 'section' : 'agent', x, y)
+    // agents inside a section orbit just outside it
+    const kids = childrenOf(n.id)
+    kids.forEach((k, j) => {
+      const spread = 0.42
+      const ka = a + (kids.length === 1 ? 0 : -spread / 2 + spread * j / (kids.length - 1))
+      let kx = x + 125 * Math.cos(ka), ky = y + 105 * Math.sin(ka)
+      if (ky > H - 90 || ky < 110) {   // no room above/below: line them up beside the section
+        const side = Math.cos(a) < -0.2 ? -1 : 1
+        kx = x + side * (135 + 115 * j); ky = y
+      }
+      wires += curve(x, y, kx, ky, `child ${k.status === 'active' ? 'flow' : ''}`)
+      html += nodeHtml(k, 'agent child', kx, ky)
+    })
+  })
+
+  // The coach orb, tied to the brain
+  const ox = cx + 150, oy = cy - 70
+  wires += curve(cx + 60, cy - 30, ox, oy, 'coach flow')
+  html += `<button class="node coach" style="left:${ox}px;top:${oy}px" data-coach="1">
+    <div class="cube">💬</div><div class="label">Coach</div></button>`
+  // Add button
+  html += `<button class="add-orb" style="left:${cx - 150}px;top:${cy - 70}px" title="Add a section, agent or board member" data-add="1">＋</button>`
+
+  // The brain
+  html += `<button class="node brain" style="left:${cx}px;top:${cy}px" data-brain="1">
+    <div class="core"><span>🧠</span></div><div class="label">My Brain</div>
+    <span class="sub">${brain.count.toLocaleString()} thoughts</span></button>`
+
+  map.innerHTML = `<svg id="wires" width="${W}" height="${H}">${wires}</svg>` + html
+}
+
+function rowHtml(n, cls = '') {
+  const v = n.kind === 'board' ? latestVerdict(n) : null
+  const d = v ? `<span class="verdict-pill v-${esc(v.verdict)}">${esc(v.verdict)} · ${v.score}/10</span>` : esc(n.description || '')
+  return `<button class="row-card ${n.kind} ${cls}" data-id="${n.id}"><div class="cube">${esc(n.emoji)}<span class="sdot ${esc(n.status)}"></span></div>
+    <div><div class="t">${esc(n.name)}</div><div class="d">${d}</div></div></button>`
+}
+
+function renderStack() {
+  let h = `<div class="stack-group boardg"><h3>Board of Directors</h3>${byKind('board').map(n => rowHtml(n)).join('') || '<p class="empty">No members yet.</p>'}</div>`
+  h += `<div class="stack-group"><h3>Center</h3>
+    <button class="row-card" data-brain="1"><div class="cube">🧠</div><div><div class="t">My Brain</div><div class="d">${brain.count.toLocaleString()} thoughts</div></div></button>
+    <button class="row-card" data-coach="1"><div class="cube" style="border-radius:50%">💬</div><div><div class="t">Coach</div><div class="d">Ask questions, get suggestions</div></div></button></div>`
+  h += `<div class="stack-group"><h3>Sections & agents</h3>`
+  for (const s of byKind('section')) {
+    h += rowHtml(s)
+    h += childrenOf(s.id).map(k => rowHtml(k, 'child')).join('')
+  }
+  h += looseAgents().map(a => rowHtml(a)).join('')
+  h += `<button class="btn" data-add="1" style="width:100%;margin-top:6px">＋ Add section, agent or board member</button></div>`
+  $('stack').innerHTML = h
+}
+
+// One click handler for both views
+function onMapClick(e) {
+  const el = e.target.closest('[data-id],[data-brain],[data-coach],[data-add]')
+  if (!el) return
+  if (el.dataset.add) return openEditor({})
+  if (el.dataset.brain) return openDrawer({ type: 'brain' })
+  if (el.dataset.coach) return openDrawer({ type: 'coach' })
+  openDrawer({ type: 'node', id: el.dataset.id })
+}
+$('map').addEventListener('click', onMapClick)
+$('drawer').addEventListener('click', e => {
+  const el = e.target.closest('.row-card[data-id]')
+  if (el) openDrawer({ type: 'node', id: el.dataset.id })
+})
+$('stack').addEventListener('click', onMapClick)
+window.addEventListener('resize', () => { clearTimeout(window._rz); window._rz = setTimeout(renderMap, 120) })
+
+// ---------------------------------------------------------------------------
+// Drawer
+// ---------------------------------------------------------------------------
+function openDrawer(p) {
+  openPanel = p
+  $('drawer').classList.add('open'); $('scrim').classList.add('on')
+  refreshPanel()
+}
+function closeDrawer() {
+  openPanel = null
+  $('drawer').classList.remove('open'); $('scrim').classList.remove('on')
+}
+$('scrim').addEventListener('click', () => { closeDrawer(); closeEditor() })
+document.addEventListener('keydown', e => { if (e.key === 'Escape') { closeEditor(); closeDrawer() } })
+
+function refreshPanel() {
+  // Don't wipe what you're typing when a live update lands
+  const active = document.activeElement
+  const typing = active && $('drawer').contains(active) && /INPUT|TEXTAREA|SELECT/.test(active.tagName)
+  const saved = typing ? { id: active.id, value: active.value } : null
+  if (openPanel.type === 'brain') $('drawer').innerHTML = brainPanel()
+  else if (openPanel.type === 'coach') $('drawer').innerHTML = coachPanel()
+  else {
+    const n = nodeById(openPanel.id)
+    if (!n) return closeDrawer()
+    $('drawer').innerHTML = nodePanel(n)
+  }
+  if (saved && saved.id && $(saved.id)) { $(saved.id).value = saved.value; $(saved.id).focus() }
+  if (openPanel.type === 'coach') { const b = $('chatLog'); if (b) b.scrollTop = b.scrollHeight }
+}
+
+function head(emoji, title, kind, cls = '') {
+  return `<div class="dhead"><div class="cube ${cls}">${esc(emoji)}</div>
+    <div style="flex:1;min-width:0"><div class="kind">${esc(kind)}</div><h2>${esc(title)}</h2></div>
+    <button class="x" onclick="closeDrawer()" aria-label="Close">×</button></div>`
+}
+
+function reviewHtml(r) {
+  const m = nodeById(r.member_id)
+  const f = r.feedback || {}
+  const list = (label, arr) => arr && arr.length ? `<div class="lbl">${label}</div><ul>${arr.map(x => `<li>${esc(x)}</li>`).join('')}</ul>` : ''
+  const pill = r.verdict ? `<span class="verdict-pill v-${esc(r.verdict)}">${esc(r.verdict)} · ${r.score}/10</span>` : '<span class="verdict-pill v-info">brief</span>'
+  const body = f.brief
+    ? `<details><summary>Read the full brief</summary><div class="sum">${esc(f.brief)}</div></details>`
+    : (list('Concerns', f.concerns) + list('Suggestions', f.suggestions) + list('Questions to ask', f.questions) + list('References', f.references))
+  return `<div class="review"><div class="top"><span class="who">${esc(m ? m.emoji + ' ' + m.name : 'Board')}</span>${pill}
+    <span class="when">${ago(r.created_at)}</span></div>
+    <div class="subj">On: ${esc(String(r.subject).split('\n')[0].slice(0, 120))}</div>
+    ${f.brief ? '' : `<div class="sum">${esc(r.summary)}</div>`}
+    ${body ? (f.brief ? body : `<details><summary>Details</summary>${body}</details>`) : ''}</div>`
+}
+
+function connHtml(c) {
+  const cls = c.access.replace('/', '')
+  return `<div class="conn"><div style="flex:1;min-width:0"><div class="sys">${esc(c.system)}</div>
+    ${c.detail || c.url ? `<div class="det">${esc(c.detail)}${c.url ? ` · <a href="${esc(c.url)}" target="_blank" rel="noopener">open</a>` : ''}</div>` : ''}</div>
+    <span class="acc ${cls}">${esc(c.access)}</span>
+    <button class="x" style="font-size:16px" title="Remove" onclick="removeConn('${c.id}')">×</button></div>`
+}
+
+function nodePanel(n) {
+  const kindName = n.kind === 'board' ? 'Board of Directors' : n.kind === 'section' ? 'Section' : 'Agent'
+  const parent = n.parent_id ? nodeById(n.parent_id) : null
+  const rs = reviewsFor(n).slice(0, 12)
+  const kids = n.kind === 'section' ? childrenOf(n.id) : []
+  const isFinance = n.kind === 'board' && /financ|money|market|cfo/i.test(n.name)
+  return head(n.emoji, n.name, kindName + (parent ? ` · in ${parent.name}` : ''), n.kind === 'board' ? 'board-cube' : '') + `
+  <div class="dbody">
+    <div class="dsec"><div class="grid2">
+      <select id="statusSel" onchange="setStatus('${n.id}', this.value)">
+        ${['active', 'building', 'planned', 'paused'].map(s => `<option ${s === n.status ? 'selected' : ''}>${s}</option>`).join('')}
+      </select>
+      <button class="btn" onclick="openEditor(nodeById('${n.id}'))">✏️ Edit</button></div></div>
+
+    ${n.description ? `<div class="dsec"><h4>What it does</h4><p>${esc(n.description)}</p></div>` : ''}
+    ${n.runs_on ? `<div class="dsec"><h4>Runs on</h4><p>${esc(n.runs_on)}</p></div>` : ''}
+    ${n.instructions ? `<div class="dsec"><h4>${n.kind === 'board' ? 'How it judges' : 'Instructions'}</h4>
+      <details><summary style="color:var(--cyan);cursor:pointer;font-size:.85rem">Show</summary><p style="margin-top:8px">${esc(n.instructions)}</p></details></div>` : ''}
+
+    <div class="dsec"><h4>Connected systems <span>${connsOf(n.id).length}</span></h4>
+      ${connsOf(n.id).map(connHtml).join('') || '<p class="empty">Nothing connected yet. What can this reach?</p>'}
+      <div class="stack8" style="margin-top:10px">
+        <div class="grid2"><input id="cSys" placeholder="System (e.g. Zendesk)">
+          <select id="cAcc"><option>read</option><option>write</option><option>read/write</option><option>admin</option></select></div>
+        <input id="cDet" placeholder="What exactly? (e.g. tickets + replies, or owner/repo)">
+        <button class="btn" onclick="addConn('${n.id}')">＋ Connect system</button>
+      </div></div>
+
+    ${n.kind === 'section' ? `<div class="dsec"><h4>Agents in this section <span>${kids.length}</span></h4>
+      ${kids.map(k => rowHtml(k)).join('') || '<p class="empty">No agents yet.</p>'}
+      <button class="btn" style="margin-top:6px" onclick="openEditor({ kind: 'agent', parent_id: '${n.id}' })">＋ Add agent here</button></div>` : ''}
+
+    <div class="dsec"><h4>${n.kind === 'board' ? 'Ask ' + esc(n.name) : 'Board review'}</h4>
+      <textarea id="askText" placeholder="${n.kind === 'board' ? 'Describe an idea, decision or plan for ' + esc(n.name) + ' to judge…' : 'Optional: what should the Board focus on?'}"></textarea>
+      <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
+        <button class="btn gold" id="askBtn" onclick="askBoard('${n.id}')">${n.kind === 'board' ? '⚖️ Get verdict' : '⚖️ Ask the whole Board'}</button>
+        ${isFinance ? `<button class="btn" id="briefBtn" onclick="runBrief()">📈 Run market brief now</button>` : ''}
+      </div><div class="msg" id="askMsg"></div></div>
+
+    <div class="dsec"><h4>${n.kind === 'board' ? 'Verdicts' : 'What the Board said'} <span>${reviewsFor(n).length}</span></h4>
+      ${rs.map(reviewHtml).join('') || '<p class="empty">Nothing yet.</p>'}</div>
+
+    <div class="dsec"><button class="btn danger" onclick="deleteNode('${n.id}')">Delete ${esc(n.name)}</button></div>
+  </div>`
+}
+
+function brainPanel() {
+  const label = s => ({ app: '✍️ App', 'icloud-notes': '📝 Apple Notes', 'icloud-reminders': '✅ Reminders', 'icloud-calendar': '📅 Calendar',
+    'icloud-drive': '📁 iCloud Drive', 'icloud-shortcut': '📲 Shortcut', web: '🔗 Web', youtube: '📹 YouTube', telegram: '✈️ Telegram',
+    'market-brief': '📈 Market brief' }[s] || s)
+  const boardOnes = reviews.filter(r => r.verdict).slice(0, 5)
+  return head('🧠', 'My Brain', 'Center of everything') + `<div class="dbody">
+    <div class="dsec"><div class="stats">
+      <div class="stat"><b>${brain.count.toLocaleString()}</b><span>thoughts</span></div>
+      <div class="stat"><b>${nodes.filter(n => n.kind !== 'board').length}</b><span>sections & agents</span></div>
+      <div class="stat"><b>${conns.length}</b><span>connections</span></div></div></div>
+    <div class="dsec"><h4>Where your recent thoughts came from</h4>
+      ${Object.entries(brain.sources).map(([s, c]) => `<div class="conn"><div class="sys" style="flex:1">${esc(label(s))}</div><span class="acc">${c}</span></div>`).join('') || '<p class="empty">Nothing yet.</p>'}</div>
+    <div class="dsec"><h4>Run an idea past the Board</h4>
+      <textarea id="ideaText" placeholder="New business idea, a decision you're weighing, a plan…"></textarea>
+      <button class="btn gold" id="ideaBtn" style="margin-top:8px" onclick="askBoardIdea()">⚖️ Ask the Board</button>
+      <div class="msg" id="ideaMsg"></div></div>
+    <div class="dsec"><h4>Latest verdicts</h4>${boardOnes.map(reviewHtml).join('') || '<p class="empty">No verdicts yet.</p>'}</div>
+    <div class="dsec"><h4>Just added <a href="index.html" style="font-size:.75rem;text-transform:none;letter-spacing:0">Capture →</a></h4>
+      ${brain.recent.slice(0, 10).map(t => `<div class="thought"><small>${ago(t.created_at)}${t.category ? ' · ' + esc(t.category) : ''}</small>
+        ${esc((t.summary || t.content).split('\n')[0].slice(0, 160))}</div>`).join('') || '<p class="empty">Empty — capture your first thought.</p>'}</div>
+  </div>`
+}
+
+// Light formatting for the coach's replies: paragraphs, bullets, bold
+function fmt(text) {
+  const blocks = esc(text).split(/\n{2,}/)
+  return blocks.map(b => {
+    const lines = b.split('\n')
+    if (lines.every(l => /^\s*([-*•]|\d+\.)\s+/.test(l))) {
+      return '<ul>' + lines.map(l => '<li>' + l.replace(/^\s*([-*•]|\d+\.)\s+/, '') + '</li>').join('') + '</ul>'
+    }
+    return '<p>' + b.replace(/\n/g, '<br>') + '</p>'
+  }).join('').replace(/\*\*(.+?)\*\*/g, '<b>$1</b>').replace(/^#+\s*/gm, '')
+}
+
+let proposals = []
+function bubble(m) {
+  if (m.role === 'user') return `<div class="bubble user">${esc(m.content)}</div>`
+  const match = m.content.match(/```proposal\s*([\s\S]*?)```/)
+  const text = m.content.replace(/```proposal[\s\S]*?```/, '').trim()
+  let extra = ''
+  if (match) {
+    try {
+      const items = JSON.parse(match[1])
+      extra = (Array.isArray(items) ? items : [items]).map(p => {
+        proposals.push(p)
+        const i = proposals.length - 1
+        const exists = nodes.some(n => n.name.toLowerCase() === String(p.name || '').toLowerCase())
+        return `<div class="proposal"><div><b>${esc(p.emoji || '🤖')} ${esc(p.name)}</b> · ${esc(p.kind)}<br><span style="color:var(--muted)">${esc(p.description || '')}</span></div>
+          ${exists ? '<span class="acc">on map</span>' : `<button class="btn primary" onclick="addProposal(${i})">Add to map</button>`}</div>`
+      }).join('')
+    } catch (_) { /* not valid JSON — just show the text */ }
+  }
+  return `<div class="bubble assistant">${fmt(text)}${extra}</div>`
+}
+
+let coachBusy = false
+function coachPanel() {
+  proposals = []
+  return head('💬', 'Coach', 'Sees your whole system', '') + `
+  <div class="dbody" id="chatLog"><div class="chat">
+    ${chat.length ? chat.map(bubble).join('') : `<p class="empty">I can see every section, agent, connection and Board verdict on your map, plus what you've been saving to your brain. Ask me anything, or tap the button below.</p>`}
+    ${coachBusy ? '<div class="typing">Coach is thinking…</div>' : ''}
+  </div></div>
+  <div style="padding:0 14px 8px"><button class="btn" style="width:100%" onclick="sendCoach(true)" ${coachBusy ? 'disabled' : ''}>💡 How do I improve my system?</button></div>
+  <div class="chatbar"><textarea id="coachText" placeholder="Ask your coach…" rows="1"
+    onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendCoach(false)}"></textarea>
+    <button class="btn primary" onclick="sendCoach(false)" ${coachBusy ? 'disabled' : ''}>Send</button></div>`
+}
+
+// ---------------------------------------------------------------------------
+// Actions
+// ---------------------------------------------------------------------------
+async function setStatus(id, status) {
+  const { error } = await db.from('cc_nodes').update({ status }).eq('id', id)
+  if (error) toast('Could not save: ' + error.message)
+}
+async function addConn(nodeId) {
+  const system = $('cSys').value.trim(), detail = $('cDet').value.trim(), access = $('cAcc').value
+  if (!system) return toast('Name the system first.')
+  const url = /^https?:\/\//.test(detail) ? detail : ''
+  const { error } = await db.from('cc_connections').insert({ node_id: nodeId, system, access, detail: url ? '' : detail, url })
+  if (error) return toast('Could not connect: ' + error.message)
+  $('cSys').value = ''; $('cDet').value = ''
+}
+async function removeConn(id) {
+  if (!confirm('Remove this connection?')) return
+  const { error } = await db.from('cc_connections').delete().eq('id', id)
+  if (error) toast('Could not remove: ' + error.message)
+}
+async function deleteNode(id) {
+  const n = nodeById(id)
+  if (!confirm(`Delete ${n.name}${n.kind === 'section' ? ' (its agents stay, unattached)' : ''}? This also removes its connections and reviews.`)) return
+  const { error } = await db.from('cc_nodes').delete().eq('id', id)
+  if (error) return toast('Could not delete: ' + error.message)
+  closeDrawer()
+}
+
+async function runReview(body, btn, msgId) {
+  const b = $(btn), label = b.textContent
+  b.disabled = true; b.textContent = 'The Board is deliberating…'
+  $(msgId).className = 'msg'; $(msgId).textContent = 'Each member is reviewing in parallel. This takes 20–60 seconds.'
+  try {
+    const r = await callFn('board-review', body)
+    await loadAll()
+    $(msgId).className = 'msg ok'
+    $(msgId).textContent = `✓ ${r.reviews.length} verdict${r.reviews.length === 1 ? '' : 's'} in${r.failed ? ` (${r.failed} member couldn't answer)` : ''}.`
+    return true
+  } catch (e) {
+    $(msgId).className = 'msg err'; $(msgId).textContent = e.message
+    return false
+  } finally { if ($(btn)) { $(btn).disabled = false; $(btn).textContent = label } }
+}
+async function askBoard(nodeId) {
+  const n = nodeById(nodeId), text = $('askText').value.trim()
+  if (n.kind === 'board') {
+    if (!text) return toast('Describe what ' + n.name + ' should judge.')
+    if (await runReview({ subject: text, member_ids: [n.id] }, 'askBtn', 'askMsg')) $('askText').value = ''
+  } else {
+    if (await runReview({ node_id: n.id, subject: text }, 'askBtn', 'askMsg')) $('askText').value = ''
+  }
+}
+async function askBoardIdea() {
+  const text = $('ideaText').value.trim()
+  if (!text) return toast('Describe the idea first.')
+  if (await runReview({ subject: text }, 'ideaBtn', 'ideaMsg')) $('ideaText').value = ''
+}
+async function runBrief() {
+  const b = $('briefBtn'); b.disabled = true; b.textContent = 'Reading the markets…'
+  try { await callFn('market-brief', {}); toast('📈 Market brief is in.') }
+  catch (e) { toast(e.message, 6000) }
+  finally { if ($('briefBtn')) { $('briefBtn').disabled = false; $('briefBtn').textContent = '📈 Run market brief now' } }
+}
+
+async function sendCoach(suggest) {
+  if (coachBusy) return
+  const text = suggest ? '' : ($('coachText').value || '').trim()
+  if (!suggest && !text) return
+  coachBusy = true
+  chat.push({ role: 'user', content: suggest ? '💡 How do I improve my system?' : text, created_at: new Date().toISOString() })
+  if ($('coachText')) $('coachText').value = ''
+  refreshPanel()
+  try {
+    await callFn('coach-chat', suggest ? { suggest: true } : { message: text })
+    coachBusy = false
+    await loadAll()
+  } catch (e) {
+    coachBusy = false
+    chat.push({ role: 'assistant', content: '⚠️ ' + e.message })
+    refreshPanel()
+  }
+}
+
+async function addProposal(i) {
+  const p = proposals[i]
+  const kind = ['agent', 'section', 'board'].includes(p.kind) ? p.kind : 'agent'
+  const parent = p.parent ? nodes.find(n => n.kind === 'section' && n.name.toLowerCase() === String(p.parent).toLowerCase()) : null
+  const access = ['read', 'write', 'read/write', 'admin']
+  try {
+    const id = await insertNode({
+      name: String(p.name || 'New agent').slice(0, 80), emoji: p.emoji || '🤖', description: p.description || '',
+      runs_on: p.runs_on || '', instructions: p.instructions || '', status: 'planned',
+      conns: (p.connections || []).filter(c => c && c.system).map(c => ({ system: String(c.system), access: access.includes(c.access) ? c.access : 'read', detail: c.detail || '' })),
+    }, kind === 'agent' && parent ? parent.id : null, kind)
+    await loadAll()
+    toast(`Added ${p.name} to your map.`)
+    if (kind !== 'board') autoReview(id)
+  } catch (e) { toast('Could not add: ' + e.message) }
+}
+
+// New agents and sections go to the Board automatically
+function autoReview(nodeId) {
+  if (!byKind('board').length) return
+  toast('⚖️ Sent to the Board for review…')
+  callFn('board-review', { node_id: nodeId }).then(
+    r => toast(`⚖️ The Board reviewed it: ${r.reviews.map(x => x.verdict).join(', ')}`, 5000),
+    e => console.warn('Auto review:', e.message))
+}
+
+// ---------------------------------------------------------------------------
+// Add / edit dialog
+// ---------------------------------------------------------------------------
+function openEditor(n) {
+  const editing = !!n.id
+  const kind = n.kind || 'agent'
+  const sections = byKind('section')
+  $('editCard').innerHTML = `<h2>${editing ? 'Edit ' + esc(n.name) : 'Add to your system'}</h2>
+    ${editing ? '' : `<label class="f">What is it?</label><select id="eKind">
+      <option value="agent" ${kind === 'agent' ? 'selected' : ''}>🤖 Agent — an AI doing a job</option>
+      <option value="section" ${kind === 'section' ? 'selected' : ''}>🗂️ Section — a business or area of life</option>
+      <option value="board" ${kind === 'board' ? 'selected' : ''}>⚖️ Board member — judges everything</option></select>`}
+    <div class="grid2" style="grid-template-columns:70px 1fr">
+      <div><label class="f">Icon</label><input id="eEmoji" value="${esc(n.emoji || (kind === 'board' ? '⚖️' : kind === 'section' ? '🗂️' : '🤖'))}" maxlength="4"></div>
+      <div><label class="f">Name</label><input id="eName" value="${esc(n.name || '')}" placeholder="e.g. Zendesk Agent"></div></div>
+    <label class="f">What does it do?</label><textarea id="eDesc" rows="2">${esc(n.description || '')}</textarea>
+    <div class="grid2">
+      <div><label class="f">Runs on</label><input id="eRuns" value="${esc(n.runs_on || '')}" placeholder="Claude Code, Zapier…"></div>
+      <div><label class="f">Status</label><select id="eStatus">${['planned', 'building', 'active', 'paused'].map(s => `<option ${s === (n.status || 'planned') ? 'selected' : ''}>${s}</option>`).join('')}</select></div></div>
+    <div id="eParentWrap" style="${kind === 'agent' && sections.length ? '' : 'display:none'}"><label class="f">Inside section</label>
+      <select id="eParent"><option value="">— Connected straight to the brain —</option>
+        ${sections.map(s => `<option value="${s.id}" ${s.id === n.parent_id ? 'selected' : ''}>${esc(s.emoji + ' ' + s.name)}</option>`).join('')}</select></div>
+    <label class="f" id="eInstrLabel">${kind === 'board' ? 'How should this member judge things?' : 'Instructions / notes'}</label>
+    <textarea id="eInstr" rows="4">${esc(n.instructions || '')}</textarea>
+    <div style="display:flex;gap:8px;margin-top:16px"><button class="btn primary" id="eSave">${editing ? 'Save' : 'Add'}</button>
+      <button class="btn ghost" onclick="closeEditor()">Cancel</button></div>
+    ${editing ? '' : '<p class="empty" style="margin-top:10px">After adding, open it to connect the systems it can access. New agents and sections are sent to the Board for review.</p>'}`
+  $('editCard').classList.add('on'); $('scrim').classList.add('on')
+  if ($('eKind')) $('eKind').onchange = e => {
+    $('eParentWrap').style.display = e.target.value === 'agent' && sections.length ? '' : 'none'
+    $('eInstrLabel').textContent = e.target.value === 'board' ? 'How should this member judge things?' : 'Instructions / notes'
+  }
+  $('eSave').onclick = () => saveEditor(n)
+  setTimeout(() => $('eName').focus(), 50)
+}
+function closeEditor() {
+  $('editCard').classList.remove('on')
+  if (!openPanel) $('scrim').classList.remove('on')
+}
+async function saveEditor(n) {
+  const kind = n.id ? n.kind : $('eKind').value
+  const fields = {
+    name: $('eName').value.trim(), emoji: $('eEmoji').value.trim() || '🤖', description: $('eDesc').value.trim(),
+    runs_on: $('eRuns').value.trim(), status: $('eStatus').value, instructions: $('eInstr').value.trim(),
+    parent_id: kind === 'agent' ? ($('eParent').value || null) : null,
+  }
+  if (!fields.name) return toast('Give it a name.')
+  $('eSave').disabled = true
+  try {
+    if (n.id) {
+      const { error } = await db.from('cc_nodes').update(fields).eq('id', n.id)
+      if (error) throw error
+      closeEditor()
+    } else {
+      const sort = nodes.filter(x => x.kind === kind).length + 1
+      const { data, error } = await db.from('cc_nodes').insert({ ...fields, kind, sort }).select('id').single()
+      if (error) throw error
+      closeEditor()
+      await loadAll()
+      openDrawer({ type: 'node', id: data.id })
+      if (kind !== 'board') autoReview(data.id)
+    }
+  } catch (e) { toast('Could not save: ' + e.message); $('eSave').disabled = false }
+}
+
+// ---------------------------------------------------------------------------
+// Sign-in and start-up
+// ---------------------------------------------------------------------------
+$('authGo').onclick = async () => {
+  $('authMsg').textContent = ''
+  const { error } = await db.auth.signInWithPassword({ email: $('authEmail').value.trim(), password: $('authPass').value })
+  if (error) { $('authMsg').className = 'msg err'; $('authMsg').textContent = error.message }
+}
+$('addBtn').onclick = () => openEditor({})
+$('coachBtn').onclick = () => openDrawer({ type: 'coach' })
+
+let shownFor
+async function applySession(session) {
+  const u = session ? session.user : null
+  if (shownFor === (u ? u.id : null)) return
+  shownFor = u ? u.id : null
+  user = u
+  if (!user) {
+    $('authCard').classList.add('on'); $('scrim').classList.add('on')
+    $('addBtn').style.display = $('coachBtn').style.display = 'none'
+    return
+  }
+  $('authCard').classList.remove('on'); $('scrim').classList.remove('on')
+  $('addBtn').style.display = $('coachBtn').style.display = ''
+  try {
+    await seedIfEmpty()
+    await loadAll()
+    subscribe()
+  } catch (e) {
+    toast(/cc_nodes/.test(e.message)
+      ? 'Run supabase/command-center.sql in your Supabase SQL editor first.'
+      : 'Could not load: ' + e.message, 10000)
+  }
+}
+
+async function init() {
+  if (typeof SUPABASE_URL === 'undefined') return toast('config.js is missing.')
+  db = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
+  db.auth.onAuthStateChange((_e, session) => setTimeout(() => applySession(session), 0))
+  const { data } = await db.auth.getSession()
+  applySession(data.session)
+}
+init()
+
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => {}))
+}
+</script>
+</body>
+</html>

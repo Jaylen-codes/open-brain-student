@@ -11,6 +11,9 @@
 //              similar, in the thought_links table               (Level 6)
 //   4. CHUNK — long captures (over 2,000 characters) are cut into pieces,
 //              each with its own meaning coordinates             (Level 7)
+//   5. BOARD — a new IDEA or PLAN is sent to your Board of Directors for
+//              review, once                                  (Command Center)
+//              Turn off with:  npx supabase secrets set AUTO_BOARD_REVIEW=off
 //
 // A function only gets a couple of seconds of computer time per call, so a
 // long transcript's pieces are mapped a few at a time: this function calls
@@ -40,6 +43,28 @@ const LINK_THRESHOLD = Number(Deno.env.get('LINK_THRESHOLD') ?? '0.82')
 const LINKS_PER_THOUGHT = 5
 const CHUNKS_PER_CALL = 2   // pieces mapped per call — more than this runs out of time on the free plan (error 546)
 const SELF_URL = `${Deno.env.get('SUPABASE_URL')}/functions/v1/enrich-thought`
+const BOARD_URL = `${Deno.env.get('SUPABASE_URL')}/functions/v1/board-review`
+const AUTO_BOARD = (Deno.env.get('AUTO_BOARD_REVIEW') ?? 'on').toLowerCase() !== 'off'
+const BOARD_CATEGORIES = ['idea', 'plan']
+
+// Big items go to the Board: ideas and plans of real substance, reviewed once,
+// and only if you have a Board. Never blocks or fails the enrichment itself.
+async function sendToBoard(t: Thought) {
+  if (!AUTO_BOARD || !t.user_id || !BOARD_CATEGORIES.includes(t.category ?? '')) return
+  if ((t.content ?? '').trim().length < 120) return
+  const [{ count: members }, { count: reviewed }] = await Promise.all([
+    db.from('cc_nodes').select('id', { count: 'exact', head: true }).eq('user_id', t.user_id).eq('kind', 'board'),
+    db.from('cc_reviews').select('id', { count: 'exact', head: true }).eq('thought_id', t.id),
+  ])
+  if (!members || reviewed) return
+  const call = fetch(BOARD_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')}` },
+    body: JSON.stringify({ thought_id: t.id, user_id: t.user_id }),
+  }).catch(err => console.warn('[enrich] Board review not started:', String(err)))
+  // deno-lint-ignore no-explicit-any
+  ;(globalThis as any).EdgeRuntime?.waitUntil?.(call)
+}
 
 const SYSTEM = 'You organize notes in a personal knowledge base. Reply with JSON only.'
 
@@ -139,6 +164,7 @@ Deno.serve(async (req) => {
       try {
         t = { ...t, ...(await tag(t)) }
         result.tagged = true
+        await sendToBoard(t).catch(err => console.warn('[enrich] Board check failed:', String(err)))
       } catch (err) {
         // Keep going: meaning and links don't depend on the tags.
         console.error('[enrich] Tagging failed:', err instanceof Error ? err.message : String(err))
