@@ -76,6 +76,21 @@
     button:hover:not(:disabled) { background: #5254cc; }
     button:disabled { background: #1e1e1e; color: #444; cursor: not-allowed; }
     button.ghost { background: transparent; border: 1px solid #2a2a2a; color: #888; }
+    /* Home: back to the Command Center map */
+    .header-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+    .home-btn {
+      display: inline-flex; align-items: center; gap: 6px; text-decoration: none;
+      background: #22d3ee; color: #04222a; font-weight: 600; font-size: .9rem;
+      padding: 8px 14px; border-radius: 10px; white-space: nowrap;
+      box-shadow: 0 0 16px rgba(34,211,238,.35);
+    }
+    .home-btn:hover { filter: brightness(1.1); }
+    .home-float {
+      position: fixed; right: 18px; bottom: 18px; z-index: 50; border-radius: 99px; padding: 12px 18px;
+      bottom: max(18px, env(safe-area-inset-bottom));
+      opacity: 0; pointer-events: none; transform: translateY(10px); transition: opacity .2s, transform .2s;
+    }
+    .home-float.show { opacity: 1; pointer-events: auto; transform: none; }
     button.ghost:hover:not(:disabled) { background: #1c1c1c; color: #ccc; }
     .hint { font-size: 0.75rem; color: #555; line-height: 1.5; }
     .help { font-size: 0.85rem; color: #888; line-height: 1.6; }
@@ -175,6 +190,8 @@
   </style>
 </head>
 <body>
+<!-- Always one tap from the map: appears once you scroll past the top -->
+<a class="home-btn home-float" id="homeFloat" href="command.html" title="Back to your Command Center map">🏠 Home</a>
 <div class="container">
 
   <header>
@@ -185,8 +202,10 @@
         <span id="statusText">Connecting...</span>
       </div>
     </div>
-    <a class="ghost" href="command.html" style="text-decoration:none;color:#22d3ee;font-size:.85rem;margin-right:10px">⚡ Command Center</a>
-    <button class="ghost" id="signOutBtn" onclick="signOut()" style="display:none">Sign out</button>
+    <div class="header-actions">
+      <a class="home-btn" href="command.html" title="Back to your Command Center map">🏠 Home</a>
+      <button class="ghost" id="signOutBtn" onclick="signOut()" style="display:none">Sign out</button>
+    </div>
   </header>
 
   <div class="banner" id="banner"></div>
@@ -1022,6 +1041,11 @@
   })
 
   // ---------- install as an app ----------
+
+  // Show the floating Home button once the header's Home button scrolls away
+  window.addEventListener('scroll', () => {
+    document.getElementById('homeFloat').classList.toggle('show', window.scrollY > 120)
+  }, { passive: true })
 
   if ('serviceWorker' in navigator) {
     window.addEventListener('load', () => {
