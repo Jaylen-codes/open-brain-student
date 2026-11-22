@@ -657,6 +657,32 @@ function connHtml(c) {
     <button class="x" style="font-size:16px" title="Remove" onclick="removeConn('${c.id}')">×</button></div>`
 }
 
+// A board member's library: books stored as connections with system "Book"
+const isBook = c => /^book/i.test(c.system)
+const booksOf = id => connsOf(id).filter(isBook)
+const systemsOf = id => connsOf(id).filter(c => !isBook(c))
+function libraryHtml(n) {
+  const books = booksOf(n.id)
+  return `<div class="dsec"><h4>📚 Library <span>${books.length}</span></h4>
+    <p class="empty" style="margin-bottom:8px">${esc(n.name)} judges your decisions by these books, and by any notes you've saved about them in your brain.</p>
+    ${books.map(b => `<div class="conn"><div style="flex:1;min-width:0"><div class="sys">📖 ${esc(b.detail)}</div></div>
+      <button class="x" style="font-size:16px" title="Remove" onclick="removeConn('${b.id}')">×</button></div>`).join('') || ''}
+    <div class="grid2" style="grid-template-columns:1fr auto;margin-top:8px">
+      <input id="bookIn" placeholder="Book title — Author (e.g. Atomic Habits — James Clear)"
+        onkeydown="if(event.key==='Enter'){event.preventDefault();addBook('${n.id}')}">
+      <button class="btn" onclick="addBook('${n.id}')">＋ Add book</button></div></div>`
+}
+async function addBook(nodeId) {
+  const title = $('bookIn').value.trim()
+  if (!title) return toast('Type a book title first.')
+  if (booksOf(nodeId).some(b => b.detail.toLowerCase() === title.toLowerCase())) return toast('Already on the shelf.')
+  const { error } = await db.from('cc_connections').insert({ node_id: nodeId, system: 'Book', access: 'read', detail: title })
+  if (error) return toast('Could not add: ' + error.message)
+  $('bookIn').value = ''
+  await loadAll()
+  toast('📚 Added to the library.')
+}
+
 function nodePanel(n) {
   const kindName = n.kind === 'board' ? 'Board of Directors' : n.kind === 'section' ? 'Section' : 'Agent'
   const parent = n.parent_id ? nodeById(n.parent_id) : null
@@ -676,8 +702,10 @@ function nodePanel(n) {
     ${n.instructions ? `<div class="dsec"><h4>${n.kind === 'board' ? 'How it judges' : 'Instructions'}</h4>
       <details><summary style="color:var(--cyan);cursor:pointer;font-size:.85rem">Show</summary><p style="margin-top:8px">${esc(n.instructions)}</p></details></div>` : ''}
 
-    <div class="dsec"><h4>Connected systems <span>${connsOf(n.id).length}</span></h4>
-      ${connsOf(n.id).map(connHtml).join('') || '<p class="empty">Nothing connected yet. What can this reach?</p>'}
+    ${n.kind === 'board' ? libraryHtml(n) : ''}
+
+    <div class="dsec"><h4>Connected systems <span>${systemsOf(n.id).length}</span></h4>
+      ${systemsOf(n.id).map(connHtml).join('') || '<p class="empty">Nothing connected yet. What can this reach?</p>'}
       <div class="stack8" style="margin-top:10px">
         <div class="grid2"><input id="cSys" placeholder="System (e.g. Zendesk)">
           <select id="cAcc"><option>read</option><option>write</option><option>read/write</option><option>admin</option></select></div>

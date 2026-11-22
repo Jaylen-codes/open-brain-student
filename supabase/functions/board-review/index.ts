@@ -13,6 +13,8 @@
 //   • related notes from your brain
 //   • code snapshots of any GitHub repos connected to that member (Tester)
 //   • live web search, if "Web" is one of that member's connections (Finance)
+//   • their LIBRARY: books on their shelf (connections named "Book") and your
+//     own notes on those books — they judge by those books' principles
 //
 // Called by:   the Command Center ("Ask the Board")       — with your login
 //              enrich-thought, for new ideas and plans      — with the service key
@@ -100,6 +102,30 @@ ${readmeText}`
 }
 
 // ---------------------------------------------------------------------------
+// The member's library — books on their shelf (connections whose system is
+// "Book"), plus anything the owner has saved in their brain about each book:
+// highlights, summaries, notes. The member judges by those books' principles.
+// ---------------------------------------------------------------------------
+async function libraryFor(memberConns: Connection[], userId: string): Promise<string> {
+  const books = memberConns.filter(c => /^book/i.test(c.system)).map(c => c.detail.trim()).filter(Boolean).slice(0, 12)
+  if (!books.length) return ''
+  const notes = await Promise.all(books.map(b =>
+    searchBrain(admin, userId, b.split(/[—–-]/)[0].trim().slice(0, 200), 3).catch(() => [])))
+  const shelf = books.map((b, i) => {
+    const mine = notes[i].length ? `\n  The owner's own notes on it:\n${renderHits(notes[i]).replace(/^/gm, '    ')}` : ''
+    return `- ${b}${mine}`
+  }).join('\n')
+  return `\n---\nYOUR LIBRARY — the books the owner values and wants decisions judged by:
+${shelf}
+
+Ground your review in the core principles of these books. Name the book and the specific idea you are applying
+(e.g. "Rich Dad Poor Dad: assets put money in your pocket, liabilities take it out"; "Atomic Habits: make it easy —
+reduce friction"). Paraphrase in your own words; do not quote more than a short phrase, and never invent quotes or
+page numbers. Where two books pull in different directions, say so. The owner's own notes on a book outrank your
+general knowledge of it. List the books and ideas you used in "references".`
+}
+
+// ---------------------------------------------------------------------------
 // One member's review
 // ---------------------------------------------------------------------------
 async function reviewAs(
@@ -108,12 +134,14 @@ async function reviewAs(
   const repos = memberConns.filter(c => /github/i.test(c.system)).map(repoFrom).filter(Boolean) as string[]
   const snapshots = repos.length ? await Promise.all(repos.slice(0, 3).map(repoSnapshot)) : []
   const canSearch = memberConns.some(c => /^web|internet|market/i.test(c.system))
+  const library = await libraryFor(memberConns, userId)
 
   const prompt = [
     `THE OWNER WANTS YOUR REVIEW OF:\n${subject}`,
     `\n---\nTHE OWNER'S SYSTEM RIGHT NOW:\n${systemText}`,
     `\n---\nRELATED NOTES FROM THE OWNER'S BRAIN:\n${brainText}`,
     snapshots.length ? `\n---\nCODE YOU HAVE ACCESS TO:\n${snapshots.join('\n\n')}` : '',
+    library,
     canSearch ? '\n---\nYou may search the web for current facts (prices, markets, news). Cite what you find.' : '',
   ].join('\n')
 
