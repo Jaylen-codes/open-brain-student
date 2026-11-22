@@ -236,6 +236,16 @@
     .bubble.assistant p + p { margin-top: 6px; }
     .proposal { margin-top: 8px; border: 1px dashed var(--cyan); border-radius: 10px; padding: 9px; display: flex; gap: 8px; align-items: center; }
     .proposal div { flex: 1; font-size: .82rem; }
+    .qcard { margin-top: 10px; border: 1px solid rgba(244,114,182,.45); border-radius: 12px; padding: 11px; background: rgba(244,114,182,.06); }
+    .qcard.done { opacity: .55; border-style: dashed; }
+    .qnode { font-size: .7rem; text-transform: uppercase; letter-spacing: .1em; color: var(--pink); font-weight: 600; }
+    .qissue { font-size: .78rem; color: var(--muted); margin-top: 3px; }
+    .qtext { font-size: .92rem; margin-top: 6px; line-height: 1.45; }
+    .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+    .chip { background: var(--bg2); border: 1px solid var(--line); color: var(--text); border-radius: 99px; padding: 5px 11px; font-size: .8rem; }
+    .chip:hover { border-color: var(--pink); }
+    .qanswer { display: flex; gap: 6px; margin-top: 8px; }
+    .qanswer input { padding: 7px 10px; }
     .chatbar { border-top: 1px solid var(--line); padding: 12px 14px; padding-bottom: max(12px, env(safe-area-inset-bottom)); display: flex; gap: 8px; }
     .chatbar textarea { min-height: 44px; max-height: 140px; }
     .typing { color: var(--muted); font-size: .85rem; }
@@ -559,7 +569,7 @@ function renderStack() {
   let h = `<div class="stack-group boardg"><h3>Board of Directors</h3>${byKind('board').map(n => rowHtml(n)).join('') || '<p class="empty">No members yet.</p>'}</div>`
   h += `<div class="stack-group"><h3>Center</h3>
     <button class="row-card" data-brain="1"><div class="cube">🧠</div><div><div class="t">My Brain</div><div class="d">${brain.count.toLocaleString()} thoughts</div></div></button>
-    <button class="row-card" data-coach="1"><div class="cube" style="border-radius:50%">💬</div><div><div class="t">Coach</div><div class="d">Ask questions, get suggestions</div></div></button></div>`
+    <button class="row-card" data-coach="1"><div class="cube" style="border-radius:50%">💬</div><div><div class="t">Coach</div><div class="d">Finds mistakes on your home page and asks you about them</div></div></button></div>`
   h += `<div class="stack-group"><h3>Sections & agents</h3>`
   for (const s of byKind('section')) {
     h += rowHtml(s)
@@ -576,7 +586,7 @@ function onMapClick(e) {
   if (!el) return
   if (el.dataset.add) return openEditor({})
   if (el.dataset.brain) return openDrawer({ type: 'brain' })
-  if (el.dataset.coach) return openDrawer({ type: 'coach' })
+  if (el.dataset.coach) { openDrawer({ type: 'coach' }); return maybeAutoAudit() }
   openDrawer({ type: 'node', id: el.dataset.id })
 }
 $('map').addEventListener('click', onMapClick)
@@ -728,39 +738,100 @@ function fmt(text) {
   }).join('').replace(/\*\*(.+?)\*\*/g, '<b>$1</b>').replace(/^#+\s*/gm, '')
 }
 
-let proposals = []
+let proposals = [], qcards = [], updates = []
+const appliedUpdates = new Set()
+const AUDIT_LABEL = '🔍 Check my home page'
+
+// Pull a fenced ```kind [...]``` block out of a coach reply
+function block(text, kind) {
+  const m = text.match(new RegExp('```' + kind + '\\s*([\\s\\S]*?)```'))
+  if (!m) return null
+  try { const v = JSON.parse(m[1]); return Array.isArray(v) ? v : [v] } catch (_) { return null }
+}
+// Has the owner already answered this question somewhere later in the chat?
+const answeredQ = q => chat.some(m => m.role === 'user' && m.content.includes(q))
+
+function questionCards(items) {
+  return items.map(q => {
+    qcards.push(q)
+    const i = qcards.length - 1
+    if (answeredQ(q.question)) {
+      return `<div class="qcard done"><div class="qnode">✓ ${esc(q.node || 'Home page')}</div><div class="qtext">${esc(q.question)}</div></div>`
+    }
+    const opts = (q.options || []).slice(0, 4).map((o, j) =>
+      `<button class="chip" onclick="answerQ(${i}, ${j})">${esc(o)}</button>`).join('')
+    return `<div class="qcard"><div class="qnode">${esc(q.node || 'Home page')}</div>
+      ${q.issue ? `<div class="qissue">${esc(q.issue)}</div>` : ''}
+      <div class="qtext">${esc(q.question)}</div>
+      ${opts ? `<div class="chips">${opts}</div>` : ''}
+      <div class="qanswer"><input id="qa${i}" placeholder="Your answer…" onkeydown="if(event.key==='Enter'){event.preventDefault();answerQ(${i})}">
+        <button class="btn primary" onclick="answerQ(${i})" ${coachBusy ? 'disabled' : ''}>Answer</button></div></div>`
+  }).join('')
+}
+
+function describeUpdate(u) {
+  const parts = []
+  for (const k of ['description', 'status', 'runs_on', 'instructions']) if (u[k]) parts.push(`${k.replace('_', ' ')} → ${String(u[k]).slice(0, 90)}`)
+  for (const c of u.add_connections || []) parts.push(`connect ${c.system} (${c.access || 'read'})`)
+  for (const c of u.set_access || []) parts.push(`${c.system} access → ${c.access}`)
+  for (const c of u.remove_connections || []) parts.push(`disconnect ${c}`)
+  return parts
+}
+function updateCards(items) {
+  return items.map(u => {
+    updates.push(u)
+    const i = updates.length - 1
+    const key = JSON.stringify(u)
+    const found = findNode(u.node)
+    return `<div class="proposal"><div><b>Fix: ${esc(u.node)}</b><ul style="margin:4px 0 0 16px;color:var(--muted)">
+      ${describeUpdate(u).map(p => `<li>${esc(p)}</li>`).join('')}</ul></div>
+      ${appliedUpdates.has(key) ? '<span class="acc">applied</span>'
+        : found ? `<button class="btn primary" onclick="applyUpdate(${i})">Apply to map</button>` : '<span class="acc">not on map</span>'}</div>`
+  }).join('')
+}
+
 function bubble(m) {
-  if (m.role === 'user') return `<div class="bubble user">${esc(m.content)}</div>`
-  const match = m.content.match(/```proposal\s*([\s\S]*?)```/)
-  const text = m.content.replace(/```proposal[\s\S]*?```/, '').trim()
-  let extra = ''
-  if (match) {
-    try {
-      const items = JSON.parse(match[1])
-      extra = (Array.isArray(items) ? items : [items]).map(p => {
-        proposals.push(p)
-        const i = proposals.length - 1
-        const exists = nodes.some(n => n.name.toLowerCase() === String(p.name || '').toLowerCase())
-        return `<div class="proposal"><div><b>${esc(p.emoji || '🤖')} ${esc(p.name)}</b> · ${esc(p.kind)}<br><span style="color:var(--muted)">${esc(p.description || '')}</span></div>
-          ${exists ? '<span class="acc">on map</span>' : `<button class="btn primary" onclick="addProposal(${i})">Add to map</button>`}</div>`
-      }).join('')
-    } catch (_) { /* not valid JSON — just show the text */ }
+  if (m.role === 'user') {
+    const about = m.content.match(/^About "(.+?)": ([\s\S]*?)\nMy answer: ([\s\S]*)$/)
+    if (about) return `<div class="bubble user"><div style="font-size:.75rem;opacity:.7">${esc(about[1])} · ${esc(about[2])}</div>${esc(about[3])}</div>`
+    return `<div class="bubble user">${esc(m.content)}</div>`
   }
+  const text = m.content.replace(/```(proposal|questions|update)[\s\S]*?```/g, '').trim()
+  let extra = ''
+  const qs = block(m.content, 'questions')
+  if (qs) extra += questionCards(qs)
+  const ups = block(m.content, 'update')
+  if (ups) extra += updateCards(ups)
+  const props = block(m.content, 'proposal')
+  if (props) extra += props.map(p => {
+    proposals.push(p)
+    const i = proposals.length - 1
+    const exists = nodes.some(n => n.name.toLowerCase() === String(p.name || '').toLowerCase())
+    return `<div class="proposal"><div><b>${esc(p.emoji || '🤖')} ${esc(p.name)}</b> · ${esc(p.kind)}<br><span style="color:var(--muted)">${esc(p.description || '')}</span></div>
+      ${exists ? '<span class="acc">on map</span>' : `<button class="btn primary" onclick="addProposal(${i})">Add to map</button>`}</div>`
+  }).join('')
   return `<div class="bubble assistant">${fmt(text)}${extra}</div>`
 }
 
 let coachBusy = false
 function coachPanel() {
-  proposals = []
-  return head('💬', 'Coach', 'Sees your whole system', '') + `
+  proposals = []; qcards = []; updates = []
+  return head('💬', 'Coach', 'Checks your home page for mistakes', '') + `
   <div class="dbody" id="chatLog"><div class="chat">
-    ${chat.length ? chat.map(bubble).join('') : `<p class="empty">I can see every section, agent, connection and Board verdict on your map, plus what you've been saving to your brain. Ask me anything, or tap the button below.</p>`}
-    ${coachBusy ? '<div class="typing">Coach is thinking…</div>' : ''}
+    ${chat.length ? chat.map(bubble).join('') : `<p class="empty">I walk through your home page looking for mistakes, gaps and anything out of date, then ask you about them. Your answers become one-click fixes.</p>`}
+    ${coachBusy ? '<div class="typing">Coach is checking your home page…</div>' : ''}
   </div></div>
-  <div style="padding:0 14px 8px"><button class="btn" style="width:100%" onclick="sendCoach(true)" ${coachBusy ? 'disabled' : ''}>💡 How do I improve my system?</button></div>
-  <div class="chatbar"><textarea id="coachText" placeholder="Ask your coach…" rows="1"
+  <div style="padding:0 14px 8px"><button class="btn" style="width:100%" onclick="sendCoach(true)" ${coachBusy ? 'disabled' : ''}>🔍 Check my home page for mistakes</button></div>
+  <div class="chatbar"><textarea id="coachText" placeholder="Answer, or ask your coach anything…" rows="1"
     onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendCoach(false)}"></textarea>
     <button class="btn primary" onclick="sendCoach(false)" ${coachBusy ? 'disabled' : ''}>Send</button></div>`
+}
+
+// The coach checks the home page by itself once a day when you open it
+function maybeAutoAudit() {
+  if (coachBusy) return
+  const last = [...chat].reverse().find(m => m.role === 'user' && m.content === AUDIT_LABEL)
+  if (!last || Date.now() - new Date(last.created_at) > 20 * 3600_000) sendCoach(true)
 }
 
 // ---------------------------------------------------------------------------
@@ -827,23 +898,69 @@ async function runBrief() {
   finally { if ($('briefBtn')) { $('briefBtn').disabled = false; $('briefBtn').textContent = '📈 Run market brief now' } }
 }
 
-async function sendCoach(suggest) {
+async function sendCoach(audit, preset) {
   if (coachBusy) return
-  const text = suggest ? '' : ($('coachText').value || '').trim()
-  if (!suggest && !text) return
+  const text = audit ? '' : (preset || ($('coachText') && $('coachText').value) || '').trim()
+  if (!audit && !text) return
   coachBusy = true
-  chat.push({ role: 'user', content: suggest ? '💡 How do I improve my system?' : text, created_at: new Date().toISOString() })
-  if ($('coachText')) $('coachText').value = ''
-  refreshPanel()
+  chat.push({ role: 'user', content: audit ? AUDIT_LABEL : text, created_at: new Date().toISOString() })
+  if (!preset && $('coachText')) $('coachText').value = ''
+  if (openPanel && openPanel.type === 'coach') refreshPanel()
   try {
-    await callFn('coach-chat', suggest ? { suggest: true } : { message: text })
+    await callFn('coach-chat', audit ? { audit: true } : { message: text })
     coachBusy = false
     await loadAll()
   } catch (e) {
     coachBusy = false
     chat.push({ role: 'assistant', content: '⚠️ ' + e.message })
-    refreshPanel()
+    if (openPanel && openPanel.type === 'coach') refreshPanel()
   }
+}
+
+// Answer one of the coach's question cards (typed, or a quick-answer chip)
+function answerQ(i, opt) {
+  const q = qcards[i]
+  const ans = opt !== undefined ? q.options[opt] : ($('qa' + i) ? $('qa' + i).value.trim() : '')
+  if (!ans) return toast('Type an answer first.')
+  sendCoach(false, `About "${q.node || 'Home page'}": ${q.question}\nMy answer: ${ans}`)
+}
+
+const findNode = name => nodes.find(n => n.name.trim().toLowerCase() === String(name || '').trim().toLowerCase())
+
+// Apply a fix the coach proposed after one of your answers
+async function applyUpdate(i) {
+  const u = updates[i], n = findNode(u.node)
+  if (!n) return toast(`"${u.node}" isn't on your map.`)
+  const ACCESS = ['read', 'write', 'read/write', 'admin'], STATUS = ['active', 'building', 'planned', 'paused']
+  try {
+    const fields = {}
+    for (const k of ['description', 'runs_on', 'instructions']) if (typeof u[k] === 'string') fields[k] = u[k]
+    if (STATUS.includes(u.status)) fields.status = u.status
+    if (Object.keys(fields).length) {
+      const { error } = await db.from('cc_nodes').update(fields).eq('id', n.id); if (error) throw error
+    }
+    const mine = connsOf(n.id), same = (a, b) => String(a).trim().toLowerCase() === String(b).trim().toLowerCase()
+    for (const sys of u.remove_connections || []) {
+      for (const c of mine.filter(c => same(c.system, sys))) {
+        const { error } = await db.from('cc_connections').delete().eq('id', c.id); if (error) throw error
+      }
+    }
+    for (const c of u.set_access || []) {
+      if (!ACCESS.includes(c.access)) continue
+      for (const x of mine.filter(x => same(x.system, c.system))) {
+        const { error } = await db.from('cc_connections').update({ access: c.access }).eq('id', x.id); if (error) throw error
+      }
+    }
+    const adds = (u.add_connections || []).filter(c => c && c.system && !mine.some(x => same(x.system, c.system)))
+    if (adds.length) {
+      const { error } = await db.from('cc_connections').insert(adds.map(c => ({
+        node_id: n.id, system: String(c.system), access: ACCESS.includes(c.access) ? c.access : 'read', detail: c.detail || '' })))
+      if (error) throw error
+    }
+    appliedUpdates.add(JSON.stringify(u))
+    await loadAll()
+    toast(`✓ Updated ${n.name} on your map.`)
+  } catch (e) { toast('Could not apply: ' + e.message) }
 }
 
 async function addProposal(i) {
@@ -946,7 +1063,7 @@ $('authGo').onclick = async () => {
   if (error) { $('authMsg').className = 'msg err'; $('authMsg').textContent = error.message }
 }
 $('addBtn').onclick = () => openEditor({})
-$('coachBtn').onclick = () => openDrawer({ type: 'coach' })
+$('coachBtn').onclick = () => { openDrawer({ type: 'coach' }); maybeAutoAudit() }
 
 let shownFor
 async function applySession(session) {
